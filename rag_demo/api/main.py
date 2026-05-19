@@ -39,3 +39,4 @@ async def ingest(payload: IngestRequest) -> dict:
         raise HTTPException(status_code=404, detail=f"File not found: {payload.file_path}")
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Ingest failed: {exc}") from exc
+ 

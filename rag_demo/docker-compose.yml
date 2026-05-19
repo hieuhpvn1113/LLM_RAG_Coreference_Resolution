@@ -7,7 +7,7 @@ services:
       POSTGRES_USER: rag_user
       POSTGRES_PASSWORD: rag_password
     ports:
-      - "5433:5432"   # đổi host port 5433 để tránh conflict với PostgreSQL local
+      - "5433:5432"
     volumes:
       - pg_storage:/var/lib/postgresql/data
       - ./migrations:/docker-entrypoint-initdb.d
@@ -17,6 +17,17 @@ services:
       timeout: 5s
       retries: 5
 
+  # ── GUI cho PostgreSQL → http://localhost:5050 ─────────────────────────────
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@admin.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5050:80"
+    depends_on:
+      - postgres
+
   qdrant:
     image: qdrant/qdrant:latest
     ports:
@@ -24,6 +35,7 @@ services:
       - "6334:6334"
     volumes:
       - qdrant_storage:/qdrant/storage
+    # Dashboard có sẵn → http://localhost:6333/dashboard
 
   elasticsearch:
     image: elasticsearch:8.13.0
@@ -43,12 +55,22 @@ services:
       timeout: 10s
       retries: 5
 
+  # ── GUI cho Elasticsearch → http://localhost:5601 ──────────────────────────
+  kibana:
+    image: kibana:8.13.0
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    ports:
+      - "5601:5601"
+    depends_on:
+      - elasticsearch
+
   neo4j:
     image: neo4j:5.18-community
     environment:
       - NEO4J_AUTH=neo4j/password
     ports:
-      - "7474:7474"
+      - "7474:7474"   # Browser có sẵn → http://localhost:7474
       - "7687:7687"
     volumes:
       - neo4j_storage:/data
