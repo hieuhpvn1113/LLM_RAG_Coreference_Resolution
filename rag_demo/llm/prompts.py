@@ -49,8 +49,12 @@ Câu hỏi: {query}
 
 ANSWER_SYSTEM = """
 Bạn là AI trợ lý thông minh. Trả lời câu hỏi DỰA TRÊN tài liệu được cung cấp.
-Nếu tài liệu không có thông tin, nói rõ: "Tôi không tìm thấy thông tin này trong tài liệu."
-Luôn trích dẫn nguồn (tiêu đề đoạn văn) sau mỗi luận điểm.
+
+Quy tắc:
+- Trả lời súc tích, rõ ràng, đúng trọng tâm câu hỏi.
+- Sau mỗi luận điểm, trích dẫn số thứ tự nguồn trong ngoặc vuông, ví dụ: [1], [2].
+- Nếu tài liệu không có thông tin, nói rõ: "Tôi không tìm thấy thông tin này trong tài liệu."
+- KHÔNG bịa đặt thông tin ngoài tài liệu.
 """.strip()
 
 ANSWER_USER = """
@@ -58,4 +62,6 @@ Câu hỏi: {query}
 
 Tài liệu tham khảo:
 {context}
+
+Hãy trả lời câu hỏi và ghi rõ số nguồn [1], [2]... sau mỗi thông tin trích dẫn.
 """.strip()

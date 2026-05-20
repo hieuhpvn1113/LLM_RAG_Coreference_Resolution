@@ -1,12 +1,26 @@
 # core/chunker.py — Semantic + Hierarchical Chunking
 """
 Chiến lược 2 cấp:
-  Level 1 (Section)   — ~1000 token  — split bởi heading / paragraph boundary
-  Level 2 (Paragraph) — ~512  token  — semantic split bằng cosine distance giữa câu
+
+  Level 1 (Section)
+    • 1 chunk cha = 1 chương hoàn chỉnh
+    • Flush CHỈ tại heading chính (Roman I./II./III. hoặc CHƯƠNG/PHẦN)
+    • Không giới hạn token — mục 1, 2, 3… luôn thuộc cùng cha
+
+  Level 2 (Paragraph)
+    • Chia từng chương thành các chunk con ngữ nghĩa
+    • Dùng embedding cosine-distance để tìm điểm cắt tự nhiên
+    • Khi 1 unit vượt CHUNK_SIZE_PARAGRAPH token → cắt theo ranh giới CÂU:
+        gom câu vào chunk, khi token ≥ limit VÀ vừa kết thúc câu → flush
+        → chunk có thể hơi vượt giới hạn, nhưng LUÔN kết thúc bằng câu hoàn chỉnh
+    • Heading mục ("1. ...", "2. ...") giữ nguyên với nội dung theo sau
+    • KHÔNG overlap giữa các chunk con
+        → mỗi chunk con là đơn vị ngữ nghĩa độc lập, vector thuần, search chính xác hơn
+        → đã có L1 parent chứa toàn bộ chương làm context khi cần
 
 Thứ tự gọi:
-  sections  = hierarchical_split(full_text, doc_id, source_file)
-  l2_chunks = semantic_split(section, doc_id)   # gọi cho từng section
+    sections  = hierarchical_split(full_text, doc_id, source_file)
+    l2_chunks = semantic_split(section, doc_id)
 """
 
 import re
@@ -14,7 +28,7 @@ import uuid
 import numpy as np
 import tiktoken
 
-from config import CHUNK_SIZE_SECTION, CHUNK_SIZE_PARAGRAPH, CHUNK_OVERLAP, SEMANTIC_THRESHOLD
+from config import CHUNK_SIZE_PARAGRAPH, SEMANTIC_THRESHOLD
 
 # ---------------------------------------------------------------------------
 # Token helpers
@@ -25,35 +39,69 @@ def count_tokens(text: str) -> int:
     return len(_enc.encode(text))
 
 def clean_text(text: str) -> str:
-    """Loại bỏ noise: nhiều dòng trống, nhiều dấu cách, BOM."""
-    text = text.replace('\ufeff', '')                  # BOM UTF-8
-    text = re.sub(r'\r\n', '\n', text)                 # Windows line endings
-    text = re.sub(r'\n{3,}', '\n\n', text)             # Max 2 consecutive newlines
-    text = re.sub(r'[ \t]+', ' ', text)                # Normalize spaces/tabs
-    text = re.sub(r' \n', '\n', text)                  # Trailing spaces before newline
+    text = text.replace('\ufeff', '')
+    text = re.sub(r'\r\n', '\n', text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    text = re.sub(r'[ \t]+', ' ', text)
+    text = re.sub(r' \n', '\n', text)
     return text.strip()
+
+def _safe_token_decode(token_ids: list) -> str:
+    raw_bytes = _enc.decode_bytes(token_ids)
+    return raw_bytes.decode('utf-8', errors='replace').lstrip('\ufffd').strip()
 
 
 # ---------------------------------------------------------------------------
 # Sentence splitter
 # ---------------------------------------------------------------------------
-def _split_sentences(text: str) -> list:
-    """
-    Tách văn bản thành danh sách câu.
-    Ưu tiên NLTK; fallback sang regex nếu NLTK chưa có punkt model.
-    """
+def _split_sentences(text: str) -> list[str]:
     try:
         import nltk
         try:
-            return nltk.sent_tokenize(text)
+            sents = nltk.sent_tokenize(text)
         except LookupError:
             nltk.download('punkt', quiet=True)
             nltk.download('punkt_tab', quiet=True)
-            return nltk.sent_tokenize(text)
+            sents = nltk.sent_tokenize(text)
+        return [s.strip() for s in sents if s.strip()]
     except Exception:
-        # Regex fallback: cắt tại . ! ? theo sau là khoảng trắng + chữ hoa / chữ số
-        parts = re.split(r'(?<=[.!?])\s+(?=[A-ZÁÀÂĂĐÊÔƠƯA-Z0-9\"\'])', text)
+        parts = re.split(r'(?<=[.!?])\s+', text)
         return [p.strip() for p in parts if p.strip()]
+
+
+# ---------------------------------------------------------------------------
+# Sentence-boundary chunker  ← cốt lõi của logic mới
+# ---------------------------------------------------------------------------
+def _split_at_sentence_boundary(sentences: list[str], max_tokens: int) -> list[str]:
+    """
+    Gom câu vào chunk theo nguyên tắc:
+      • Thêm câu vào chunk hiện tại
+      • Khi tổng token ≥ max_tokens VÀ vừa kết thúc câu → flush, bắt đầu chunk mới
+      • Câu đơn dài hơn max_tokens → vẫn giữ nguyên 1 chunk (không cắt giữa câu)
+
+    Kết quả: mỗi chunk luôn kết thúc ở '.' (hoặc '!' '?') — không bao giờ bị cụt.
+    """
+    if not sentences:
+        return []
+
+    chunks: list[str] = []
+    current: list[str] = []
+    current_tok = 0
+
+    for sent in sentences:
+        sent_tok = count_tokens(sent)
+        current.append(sent)
+        current_tok += sent_tok
+
+        if current_tok >= max_tokens:
+            chunks.append(' '.join(current).strip())
+            current = []
+            current_tok = 0
+
+    if current:
+        chunks.append(' '.join(current).strip())
+
+    return [c for c in chunks if c]
 
 
 # ---------------------------------------------------------------------------
@@ -61,93 +109,144 @@ def _split_sentences(text: str) -> list:
 # ---------------------------------------------------------------------------
 def _cosine_distance(v1: list, v2: list) -> float:
     a, b = np.array(v1), np.array(v2)
-    norm_a, norm_b = np.linalg.norm(a), np.linalg.norm(b)
-    if norm_a == 0 or norm_b == 0:
+    na, nb = np.linalg.norm(a), np.linalg.norm(b)
+    if na == 0 or nb == 0:
         return 0.0
-    return float(1.0 - np.dot(a, b) / (norm_a * norm_b))
+    return float(1.0 - np.dot(a, b) / (na * nb))
 
 
 # ---------------------------------------------------------------------------
-# Heading detector
+# Heading detectors
 # ---------------------------------------------------------------------------
-_HEADING_RE = re.compile(
-    r'^(?:'
-    r'#{1,3}\s.+'                           # Markdown: # Heading
-    r'|[A-Z][A-Z0-9\s\-:]{4,}$'            # ALL CAPS title (≥ 5 chars)
-    r'|[=\-]{3,}'                           # Separator: === hoặc ---
-    r')$',
-    re.MULTILINE
+_MAJOR_SECTION_RE = re.compile(
+    r'^\s*(?:'
+    r'(?:I{1,3}|IV|VI{0,3}|IX|X{1,2}(?:I{0,3}|IV|VI{0,3}|IX)?|XI{0,3})\.\s+\S.{0,250}'
+    r'|(?:Chương|CHƯƠNG|Phần|PHẦN|Mục|MỤC)\s+[\dIVXLCDM]+[.:\s]\s*\S.{0,250}'
+    r')\s*$',
+    re.IGNORECASE,
 )
 
-def _is_heading(para: str) -> bool:
-    para = para.strip()
-    if len(para) > 120:        # Tiêu đề không quá dài
+# Heading mục cấp 2: "1. ...", "2. ...", "a) ...", "b) ..."
+_SUB_HEADING_RE = re.compile(
+    r'^\s*(?:\d+\.|[a-zđ]\))\s+\S.{0,200}\s*$',
+    re.IGNORECASE,
+)
+
+def _is_major_section_heading(line: str) -> bool:
+    line = line.strip()
+    return bool(line) and len(line) <= 350 and bool(_MAJOR_SECTION_RE.match(line))
+
+def _is_sub_heading(line: str) -> bool:
+    """True cho heading mục cấp 2: '1. Cơ sở chính trị', '2. Quan điểm', 'a) ...'"""
+    line = line.strip()
+    return bool(line) and bool(_SUB_HEADING_RE.match(line))
+
+_MINOR_HEADING_RE = re.compile(
+    r'^\s*(?:'
+    r'#{1,2}\s+.+'
+    r'|(?:I{1,3}|IV|VI{0,3}|IX|X{0,3}(?:I{1,3}|IV|VI{0,3}|IX)?)\.\s+\S.{0,200}'
+    r'|(?:Chương|CHƯƠNG|Phần|PHẦN|Mục|MỤC)\s+[\dIVXLCDM]+[.:\s]\s*\S.{0,200}'
+    r')\s*$',
+    re.IGNORECASE,
+)
+
+def _is_all_caps_title(text: str) -> bool:
+    stripped = text.strip()
+    if len(stripped.split()) < 4:
         return False
-    return bool(_HEADING_RE.match(para))
+    letters = [ch for ch in stripped if ch.isalpha()]
+    if len(letters) < 10:
+        return False
+    upper_letters = [ch for ch in letters if ch.isupper()]
+    return len(upper_letters) / len(letters) >= 0.85 and len(stripped) <= 120
+
+def _is_section_heading(line: str) -> bool:
+    line = line.strip()
+    if not line or len(line) > 300:
+        return False
+    return bool(_MINOR_HEADING_RE.match(line)) or _is_all_caps_title(line)
+
+def _normalize_to_blocks(text: str) -> list[str]:
+    """
+    Tách text thành blocks tại blank line hoặc ranh giới heading.
+    Heading mục ("1. ...", "2. ...") KHÔNG tách thành block riêng —
+    chúng sẽ được gom với nội dung theo sau trong _group_heading_with_content.
+    """
+    raw_paragraphs = re.split(r'\n\n+', text)
+    blocks = []
+    for para in raw_paragraphs:
+        para = para.strip()
+        if not para:
+            continue
+        lines = para.split('\n')
+        if len(lines) == 1:
+            blocks.append(para)
+            continue
+        current_lines = []
+        for line in lines:
+            ls = line.strip()
+            if not ls:
+                continue
+            # Chỉ tách heading CHÍNH và ALL_CAPS thành block riêng
+            # Heading mục (1. / 2. / a)) giữ nguyên với nội dung
+            if _is_section_heading(ls) and not _is_sub_heading(ls):
+                if current_lines:
+                    blocks.append('\n'.join(current_lines))
+                    current_lines = []
+                blocks.append(ls)
+            else:
+                current_lines.append(line)
+        if current_lines:
+            blocks.append('\n'.join(current_lines))
+    return [b for b in blocks if b.strip()]
 
 
 # ---------------------------------------------------------------------------
-# STEP 1: Hierarchical Split → Level 1 (Sections)
+# STEP 1: Hierarchical Split → Level 1
 # ---------------------------------------------------------------------------
 def hierarchical_split(text: str, doc_id: str, source_file: str) -> list:
     """
-    Trả về list[dict] — mỗi dict là 1 Level 1 chunk (Section).
-    Mỗi chunk đã có 'chunk_id' UUID được assign sẵn.
-
-    Chiến lược:
-      1. Tách text thành paragraphs (split by \\n\\n)
-      2. Khi gặp heading → bắt đầu section mới
-      3. Khi token count vượt CHUNK_SIZE_SECTION → bắt đầu section mới
-      4. Cuối cùng merge các section quá nhỏ (< 100 token) vào section trước
+    1 chương = 1 chunk cha.
+    Flush CHỈ tại heading chính Roman numeral / CHƯƠNG / PHẦN.
+    Không giới hạn token ở L1.
     """
     text = clean_text(text)
-    raw_paragraphs = [p.strip() for p in re.split(r'\n\n+', text) if p.strip()]
-
-    if not raw_paragraphs:
+    blocks = _normalize_to_blocks(text)
+    if not blocks:
         return []
 
-    # Nhóm paragraphs thành sections
-    sections_raw = []          # list of str
-    current_parts = []
-    current_tokens = 0
+    sections_raw: list[str] = []
+    current_parts: list[str] = []
 
-    for para in raw_paragraphs:
-        para_tokens = count_tokens(para)
-        is_heading   = _is_heading(para)
-
-        # Bắt đầu section mới khi: gặp heading HOẶC overflow token
-        if (is_heading or current_tokens + para_tokens > CHUNK_SIZE_SECTION) and current_parts:
+    for block in blocks:
+        if _is_major_section_heading(block) and current_parts:
             sections_raw.append('\n\n'.join(current_parts))
             current_parts = []
-            current_tokens = 0
-
-        current_parts.append(para)
-        current_tokens += para_tokens
+        current_parts.append(block)
 
     if current_parts:
         sections_raw.append('\n\n'.join(current_parts))
 
-    # Merge section quá nhỏ (< 100 token) vào section trước
-    merged = []
+    # Merge section quá nhỏ (< 80 token) vào trước — trừ khi là heading chính
+    merged: list[str] = []
     for s in sections_raw:
-        if merged and count_tokens(s) < 100:
+        s = s.strip()
+        first_line = s.split('\n')[0].strip()
+        if merged and count_tokens(s) < 80 and not _is_major_section_heading(first_line):
             merged[-1] = merged[-1] + '\n\n' + s
         else:
             merged.append(s)
 
-    # Tạo chunk dicts với pre-assigned UUIDs
     chunks = []
     char_cursor = 0
     for idx, section_text in enumerate(merged):
         if not section_text.strip():
             continue
         cleaned = clean_text(section_text)
-        # Tìm vị trí char trong text gốc (tìm từ cursor để tránh false positive)
-        pos = text.find(section_text, char_cursor)
-        char_start = pos if pos != -1 else 0
+        pos = text.find(section_text[:80], char_cursor)
+        char_start = pos if pos != -1 else char_cursor
         char_end   = char_start + len(section_text)
         char_cursor = char_end
-
         chunks.append({
             'chunk_id':    str(uuid.uuid4()),
             'doc_id':      doc_id,
@@ -155,7 +254,7 @@ def hierarchical_split(text: str, doc_id: str, source_file: str) -> list:
             'parent_id':   None,
             'prev_id':     None,
             'next_id':     None,
-            'seq_no':      idx,
+            'seq_no':      str(idx),
             'raw_text':    section_text,
             'clean_text':  cleaned,
             'token_count': count_tokens(cleaned),
@@ -164,7 +263,6 @@ def hierarchical_split(text: str, doc_id: str, source_file: str) -> list:
             'char_end':    char_end,
         })
 
-    # Fallback: nếu không tách được gì
     if not chunks:
         cleaned = clean_text(text)
         chunks.append({
@@ -174,7 +272,7 @@ def hierarchical_split(text: str, doc_id: str, source_file: str) -> list:
             'parent_id':   None,
             'prev_id':     None,
             'next_id':     None,
-            'seq_no':      0,
+            'seq_no':      '0',
             'raw_text':    text,
             'clean_text':  cleaned,
             'token_count': count_tokens(cleaned),
@@ -183,70 +281,50 @@ def hierarchical_split(text: str, doc_id: str, source_file: str) -> list:
             'char_end':    len(text),
         })
 
+    for i, c in enumerate(chunks):
+        if i > 0:
+            c['prev_id'] = chunks[i - 1]['chunk_id']
+        if i < len(chunks) - 1:
+            c['next_id'] = chunks[i + 1]['chunk_id']
+
     return chunks
 
 
 # ---------------------------------------------------------------------------
-# STEP 2: Semantic Split → Level 2 (Paragraphs)
+# STEP 2: Semantic Split → Level 2  (no overlap, sentence-boundary cut)
 # ---------------------------------------------------------------------------
-def semantic_split(section: dict, doc_id: str) -> list:
+def _semantic_units(text: str) -> list[str]:
     """
-    Nhận 1 Level 1 section dict, trả về list[dict] Level 2 chunks.
-
-    Chiến lược:
-      1. Tách thành câu
-      2. Embed tất cả câu bằng all-MiniLM-L6-v2 (batch)
-      3. Tính cosine distance giữa câu liên tiếp
-      4. Cắt tại điểm có distance > SEMANTIC_THRESHOLD
-      5. Gộp các group quá nhỏ
-      6. Thêm overlap ~CHUNK_OVERLAP token ở đầu mỗi chunk
-      7. Gán prev_id / next_id để tạo linked list
+    Dùng embedding cosine-distance để tìm điểm cắt ngữ nghĩa tự nhiên.
+    Trả về list[str] — mỗi phần tử là 1 nhóm câu có cùng chủ đề.
+    Heading mục ("1. ...", "2. ...") KHÔNG bị tách khỏi câu đầu tiên theo sau.
     """
-    from core.embedder import embed_batch   # lazy import — model load lần đầu
-
-    text        = section['clean_text']
-    parent_id   = section['chunk_id']
-    source_file = section.get('source_file', '')
-    # seq_no cấp 2: section_seq * 1000 + paragraph_index
-    base_seq    = section['seq_no'] * 1000
-
-    # Nếu section đủ ngắn → giữ nguyên làm 1 Level 2 chunk
-    if count_tokens(text) <= CHUNK_SIZE_PARAGRAPH:
-        cid = str(uuid.uuid4())
-        return [{
-            'chunk_id':    cid,
-            'doc_id':      doc_id,
-            'level':       2,
-            'parent_id':   parent_id,
-            'prev_id':     None,
-            'next_id':     None,
-            'seq_no':      base_seq,
-            'raw_text':    text,
-            'clean_text':  text,
-            'token_count': count_tokens(text),
-            'source_file': source_file,
-        }]
+    from core.embedder import embed_batch
 
     sentences = _split_sentences(text)
-    if not sentences:
-        return []
+    if len(sentences) <= 1:
+        return [text]
 
-    # Embed tất cả câu 1 lần (batch — nhanh hơn nhiều so với từng câu)
     vectors = embed_batch(sentences)
 
-    # Tìm điểm cắt ngữ nghĩa
-    # Dùng cửa sổ 2 câu để giảm noise: so sánh trung bình window trái vs phải
-    cut_indices = set()
-    WIN = 2   # Window size
+    # Tính điểm cắt bằng cosine distance
+    cut_indices: set[int] = set()
+    WIN = 2
     for i in range(WIN, len(sentences) - WIN):
-        v_left  = np.mean([vectors[j] for j in range(max(0, i-WIN), i)], axis=0)
-        v_right = np.mean([vectors[j] for j in range(i, min(len(vectors), i+WIN))], axis=0)
-        dist = _cosine_distance(v_left.tolist(), v_right.tolist())
-        if dist > SEMANTIC_THRESHOLD:
+        v_left  = np.mean([vectors[j] for j in range(max(0, i - WIN), i)], axis=0)
+        v_right = np.mean([vectors[j] for j in range(i, min(len(vectors), i + WIN))], axis=0)
+        if _cosine_distance(v_left.tolist(), v_right.tolist()) > SEMANTIC_THRESHOLD:
             cut_indices.add(i)
 
-    # Nhóm câu thành groups theo điểm cắt
-    groups = []
+    # Không cắt ngay SAU heading mục — heading phải đi cùng câu đầu của đoạn nó dẫn
+    protected: set[int] = set()
+    for i in cut_indices:
+        if _is_sub_heading(sentences[i - 1]):   # câu trước điểm cắt là heading → bảo vệ
+            protected.add(i)
+    cut_indices -= protected
+
+    # Tạo groups từ cut_indices
+    groups: list[list[str]] = []
     start = 0
     for cut in sorted(cut_indices):
         if cut > start:
@@ -254,62 +332,96 @@ def semantic_split(section: dict, doc_id: str) -> list:
         start = cut
     if start < len(sentences):
         groups.append(sentences[start:])
-
     if not groups:
         groups = [sentences]
 
-    # Gộp groups quá nhỏ (< 80 token) vào group kề
-    merged_groups = []
+    # Merge nhóm quá ngắn (< 80 token) vào nhóm liền trước
+    merged: list[list[str]] = []
     for g in groups:
-        g_text = ' '.join(g)
-        if merged_groups and count_tokens(g_text) < 80:
-            merged_groups[-1] += g       # gộp vào group trước
+        g_tok = count_tokens(' '.join(g))
+        if merged and g_tok < 80:
+            merged[-1] += g
         else:
-            merged_groups.append(list(g))
+            merged.append(list(g))
 
-    if not merged_groups:
-        merged_groups = [sentences]
+    return [' '.join(g).strip() for g in merged if g]
 
-    # Tạo chunks với overlap
+
+def semantic_split(section: dict, doc_id: str) -> list:
+    """
+    Chia L1 section thành L2 chunks:
+      1. Dùng cosine-distance để tạo semantic units
+      2. Unit nào ≤ CHUNK_SIZE_PARAGRAPH → 1 chunk
+      3. Unit nào > CHUNK_SIZE_PARAGRAPH → dùng _split_at_sentence_boundary:
+            gom câu cho đến khi token ≥ limit VÀ vừa kết thúc câu → flush
+            → chunk LUÔN kết thúc bằng câu hoàn chỉnh, bắt đầu bằng câu hoàn chỉnh
+      Không overlap giữa các chunk.
+    """
+    text        = section['clean_text']
+    parent_id   = section['chunk_id']
+    source_file = section.get('source_file', '')
+    parent_seq  = str(section['seq_no'])
+
+    # Section ngắn → 1 chunk L2
+    if count_tokens(text) <= CHUNK_SIZE_PARAGRAPH:
+        return [{
+            'chunk_id':    str(uuid.uuid4()),
+            'doc_id':      doc_id,
+            'level':       2,
+            'parent_id':   parent_id,
+            'prev_id':     None,
+            'next_id':     None,
+            'seq_no':      f"{parent_seq}.{0:04d}",
+            'raw_text':    text,
+            'clean_text':  text,
+            'token_count': count_tokens(text),
+            'source_file': source_file,
+        }]
+
+    print(f"[chunker] Semantic split section {parent_seq} ({count_tokens(text)} tokens)")
+
+    # Bước 1: chia thành semantic units
+    units = _semantic_units(text)
+    if not units:
+        units = [text]
+
+    # Bước 2: mỗi unit — giữ nguyên nếu ngắn, chia theo ranh giới câu nếu dài
+    final_texts: list[str] = []
+    for unit in units:
+        if not unit:
+            continue
+        if count_tokens(unit) <= CHUNK_SIZE_PARAGRAPH:
+            final_texts.append(unit)
+        else:
+            # Đơn vị quá dài → chia theo câu, flush tại ranh giới câu
+            sents = _split_sentences(unit)
+            sub_chunks = _split_at_sentence_boundary(sents, CHUNK_SIZE_PARAGRAPH)
+            final_texts.extend(sub_chunks)
+
+    # Bước 3: đóng gói thành chunk dict
     chunks = []
-    overlap_text = ''
-
-    for idx, group in enumerate(merged_groups):
-        body = ' '.join(group)
-        # Prepend overlap từ chunk trước
-        chunk_text = (overlap_text.strip() + ' ' + body).strip() if overlap_text else body
-
-        # Nếu chunk vượt CHUNK_SIZE_PARAGRAPH → cắt cứng ở giới hạn token
-        tokens = _enc.encode(chunk_text)
-        if len(tokens) > CHUNK_SIZE_PARAGRAPH:
-            chunk_text = _enc.decode(tokens[:CHUNK_SIZE_PARAGRAPH])
-
-        # Chuẩn bị overlap cho chunk tiếp theo
-        final_tokens = _enc.encode(chunk_text)
-        if len(final_tokens) > CHUNK_OVERLAP:
-            overlap_text = _enc.decode(final_tokens[-CHUNK_OVERLAP:])
-        else:
-            overlap_text = chunk_text
-
+    for chunk_text in final_texts:
+        chunk_text = chunk_text.strip()
+        if not chunk_text:
+            continue
         chunks.append({
             'chunk_id':    str(uuid.uuid4()),
             'doc_id':      doc_id,
             'level':       2,
             'parent_id':   parent_id,
-            'prev_id':     None,   # điền sau khi có đủ danh sách
+            'prev_id':     None,
             'next_id':     None,
-            'seq_no':      base_seq + idx,
+            'seq_no':      f"{parent_seq}.{len(chunks):04d}",
             'raw_text':    chunk_text,
             'clean_text':  chunk_text,
             'token_count': count_tokens(chunk_text),
             'source_file': source_file,
         })
 
-    # Gán prev_id / next_id → linked list trong cùng 1 section
-    for i, chunk in enumerate(chunks):
+    for i, c in enumerate(chunks):
         if i > 0:
-            chunk['prev_id'] = chunks[i - 1]['chunk_id']
+            c['prev_id'] = chunks[i - 1]['chunk_id']
         if i < len(chunks) - 1:
-            chunk['next_id'] = chunks[i + 1]['chunk_id']
+            c['next_id'] = chunks[i + 1]['chunk_id']
 
     return chunks

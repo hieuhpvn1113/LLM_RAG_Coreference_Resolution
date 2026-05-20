@@ -98,7 +98,7 @@ async def inspect_postgres(doc_id: str | None = None, full: bool = False):
             FROM chunks
             {filter_sql}
             WHERE level = 2
-            ORDER BY seq_no
+            ORDER BY string_to_array(seq_no, ".")::int[]
             LIMIT 5
             """,
             *filter_val
@@ -303,7 +303,7 @@ def inspect_neo4j(doc_id: str | None = None):
                 WHERE c.level = 2
                 RETURN c.chunk_id AS id, c.title AS title,
                        c.summary AS summary, c.seq_no AS seq
-                ORDER BY c.seq_no LIMIT 5
+                ORDER BY string_to_array(c.seq_no, ".")::int[] LIMIT 5
                 """,
                 doc_id=doc_id,
             ).data()

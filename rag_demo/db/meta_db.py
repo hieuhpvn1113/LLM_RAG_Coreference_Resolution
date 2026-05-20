@@ -20,6 +20,20 @@ class MetaDB:
 
     # ── Documents ──────────────────────────────────────────────────────────────
 
+    async def get_document_by_filename(self, file_name: str) -> dict | None:
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT doc_id::TEXT, file_name, status, total_chunks, created_at
+                FROM documents
+                WHERE file_name = $1 AND status = 'ready'
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                file_name
+            )
+            return dict(row) if row else None
+
     async def create_document(self, file_name: str, file_path: str) -> str:
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -46,14 +60,8 @@ class MetaDB:
     # ── Chunks ─────────────────────────────────────────────────────────────────
 
     async def insert_chunk(self, chunk: dict) -> str:
-        """
-        Insert chunk vào PostgreSQL.
-        Nếu chunk đã có 'chunk_id' (pre-assigned UUID) → dùng luôn.
-        Nếu không → để PostgreSQL tự generate.
-        """
         async with self.pool.acquire() as conn:
             if chunk.get("chunk_id"):
-                # Dùng UUID đã assign sẵn (quan trọng để set parent_id đúng)
                 row = await conn.fetchrow(
                     """
                     INSERT INTO chunks (
@@ -91,7 +99,6 @@ class MetaDB:
                 return row["chunk_id"]
 
     async def update_chunk_links(self, chunk_id: str, prev_id: str | None, next_id: str | None):
-        """Cập nhật linked list (prev_id / next_id) sau khi tất cả chunks đã được insert."""
         async with self.pool.acquire() as conn:
             await conn.execute(
                 """
@@ -103,7 +110,6 @@ class MetaDB:
             )
 
     async def update_enrichment(self, chunk_id: str, enrichment: dict):
-        """Cập nhật sau khi LLM enrichment xong."""
         async with self.pool.acquire() as conn:
             await conn.execute(
                 """
@@ -124,7 +130,6 @@ class MetaDB:
             )
 
     async def mark_embedded(self, chunk_id: str, model: str):
-        """Đánh dấu chunk đã được embed xong."""
         async with self.pool.acquire() as conn:
             await conn.execute(
                 """
@@ -136,25 +141,28 @@ class MetaDB:
             )
 
     async def get_context(self, chunk_ids: list) -> list:
-        """Lấy chunks + parent để expand context (dùng trong Phase 3 search)."""
+        """
+        Lấy full context của các chunk từ PostgreSQL.
+        Bao gồm source_file, seq_no, char_start, char_end để hiển thị nguồn gốc.
+        """
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
                 """
                 SELECT c.chunk_id::TEXT, c.doc_id::TEXT, c.level, c.seq_no,
                        c.clean_text, c.title, c.summary, c.token_count,
+                       c.source_file, c.char_start, c.char_end,
                        c.parent_id::TEXT, c.prev_id::TEXT, c.next_id::TEXT,
                        p.clean_text AS parent_text, p.title AS parent_title
                 FROM chunks c
                 LEFT JOIN chunks p ON c.parent_id = p.chunk_id
                 WHERE c.chunk_id = ANY($1::UUID[])
-                ORDER BY c.seq_no
+                ORDER BY string_to_array(c.seq_no, '.')::int[]
                 """,
                 chunk_ids
             )
             return [dict(r) for r in rows]
 
     async def get_prev_next(self, chunk_id: str) -> dict:
-        """Lấy chunk trước và sau (dùng khi context quá ngắn)."""
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
@@ -167,7 +175,6 @@ class MetaDB:
             return dict(row) if row else {}
 
     async def get_pending_embed(self, limit: int = 50) -> list:
-        """Lấy Level 2 chunks chưa embed — dùng idx_chunks_embed_status."""
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
                 """
@@ -182,7 +189,6 @@ class MetaDB:
             return [dict(r) for r in rows]
 
     async def log_search(self, log: dict):
-        """Ghi log search vào PostgreSQL."""
         async with self.pool.acquire() as conn:
             await conn.execute(
                 """

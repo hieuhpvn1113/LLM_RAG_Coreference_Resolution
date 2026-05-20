@@ -28,7 +28,7 @@ _INDEX_MAPPING = {
                 "analyzer": "standard",
             },
             "level":                  {"type": "integer"},
-            "seq_no":                 {"type": "integer"},
+            "seq_no":                 {"type": "keyword"},
             "source_file":            {"type": "keyword"},
         }
     },
@@ -82,7 +82,7 @@ class KeywordDB:
                 "keywords":               chunk.get("keywords", []),
                 "hypothetical_questions": chunk.get("hypothetical_questions", []),
                 "level":                  chunk.get("level", 2),
-                "seq_no":                 chunk.get("seq_no", 0),
+                "seq_no":                 chunk.get("seq_no", "0"),
                 "source_file":            chunk.get("source_file", ""),
             },
         )
@@ -102,7 +102,7 @@ class KeywordDB:
                     "keywords":               chunk.get("keywords", []),
                     "hypothetical_questions": chunk.get("hypothetical_questions", []),
                     "level":                  chunk.get("level", 2),
-                    "seq_no":                 chunk.get("seq_no", 0),
+                    "seq_no":                 chunk.get("seq_no", "0"),
                     "source_file":            chunk.get("source_file", ""),
                 },
             }

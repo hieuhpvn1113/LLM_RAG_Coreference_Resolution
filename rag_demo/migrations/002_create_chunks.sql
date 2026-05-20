@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS chunks (
     parent_id   UUID REFERENCES chunks(chunk_id) ON DELETE SET NULL,
     prev_id     UUID REFERENCES chunks(chunk_id) ON DELETE SET NULL,
     next_id     UUID REFERENCES chunks(chunk_id) ON DELETE SET NULL,
-    seq_no      INTEGER NOT NULL DEFAULT 0,
+    seq_no      TEXT NOT NULL DEFAULT '0',
 
     raw_text    TEXT NOT NULL,
     clean_text  TEXT,

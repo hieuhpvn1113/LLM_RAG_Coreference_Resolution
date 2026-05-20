@@ -50,6 +50,8 @@ Mo `.env` va dien cac gia tri can thiet (DB, LLM key, model, ...).
 ## 4) Khoi dong he thong
 
 ```bash
+docker compose down
+
 docker compose up -d
 ```
 

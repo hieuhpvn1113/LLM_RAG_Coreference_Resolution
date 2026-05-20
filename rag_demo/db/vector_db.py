@@ -42,7 +42,7 @@ class VectorDB:
                     "summary":     chunk.get("summary", ""),
                     "clean_text":  chunk.get("clean_text", ""),
                     "source_file": chunk.get("source_file", ""),
-                    "seq_no":      chunk.get("seq_no", 0),
+                    "seq_no":      chunk.get("seq_no", "0"),
                 },
             )
             for chunk, vector in zip(chunks, vectors)

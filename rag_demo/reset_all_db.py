@@ -91,7 +91,7 @@ def reset_elasticsearch():
                 "keywords":               {"type": "keyword"},
                 "hypothetical_questions": {"type": "text", "analyzer": "standard"},
                 "level":                  {"type": "integer"},
-                "seq_no":                 {"type": "integer"},
+                "seq_no":                 {"type": "keyword"},
                 "source_file":            {"type": "keyword"},
             }
         },

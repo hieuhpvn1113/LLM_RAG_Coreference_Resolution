@@ -43,7 +43,7 @@ class GraphDB:
                 MERGE (c)-[:BELONGS_TO]->(d)
                 """,
                 chunk_id=chunk["chunk_id"], doc_id=chunk["doc_id"],
-                level=chunk.get("level", 2), seq_no=chunk.get("seq_no", 0),
+                level=chunk.get("level", 2), seq_no=chunk.get("seq_no", "0"),
                 title=chunk.get("title", ""), summary=chunk.get("summary", ""),
             )
 
