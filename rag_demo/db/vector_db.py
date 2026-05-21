@@ -30,6 +30,10 @@ class VectorDB:
     # ── Write ─────────────────────────────────────────────────────────────────
 
     def upsert_batch(self, chunks: list, vectors: list):
+        """
+        Chỉ lưu metadata nhỏ để filter/sort — KHÔNG lưu full text.
+        Full text là trách nhiệm của PostgreSQL (source of truth).
+        """
         points = [
             PointStruct(
                 id=chunk["chunk_id"],
@@ -39,8 +43,6 @@ class VectorDB:
                     "doc_id":      chunk["doc_id"],
                     "level":       chunk.get("level", 2),
                     "title":       chunk.get("title", ""),
-                    "summary":     chunk.get("summary", ""),
-                    "clean_text":  chunk.get("clean_text", ""),
                     "source_file": chunk.get("source_file", ""),
                     "seq_no":      chunk.get("seq_no", "0"),
                 },
@@ -55,8 +57,8 @@ class VectorDB:
     def search(self, query_vector: list, top_k: int = 3,
                doc_id: str | None = None) -> list:
         """
-        Dense vector search — tương thích cả Qdrant client v1 lẫn v2.
-        Thử query_points (v2) trước, fallback sang search (v1) nếu cần.
+        Dense vector search — trả về chunk_id + score + title.
+        Full text KHÔNG trả về ở đây — fetch từ PostgreSQL sau khi có chunk_id.
         """
         query_filter = None
         if doc_id:
@@ -64,7 +66,6 @@ class VectorDB:
                 must=[FieldCondition(key="doc_id", match=MatchValue(value=doc_id))]
             )
 
-        # Qdrant client ≥ 1.7 dùng query_points
         try:
             response = self.client.query_points(
                 collection_name=QDRANT_COLLECTION,
@@ -76,7 +77,6 @@ class VectorDB:
             results = response.points
 
         except AttributeError:
-            # Fallback cho client cũ dùng .search()
             results = self.client.search(          # type: ignore[attr-defined]
                 collection_name=QDRANT_COLLECTION,
                 query_vector=query_vector,
@@ -87,12 +87,10 @@ class VectorDB:
 
         return [
             {
-                "chunk_id":   r.payload.get("chunk_id", str(r.id)),
-                "score":      r.score,
-                "title":      r.payload.get("title", ""),
-                "summary":    r.payload.get("summary", ""),
-                "clean_text": r.payload.get("clean_text", ""),
-                "source":     "qdrant",
+                "chunk_id": r.payload.get("chunk_id", str(r.id)),
+                "score":    r.score,
+                "title":    r.payload.get("title", ""),
+                "source":   "qdrant",
             }
             for r in results
         ]

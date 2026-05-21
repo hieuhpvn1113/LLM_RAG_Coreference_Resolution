@@ -1,12 +1,12 @@
 # core/retriever.py — Search Pipeline
 """
 Pipeline:
-  1. Query Rewrite  — Groq LLM viết lại thành 3 phiên bản
+  1. Query Rewrite  — LLM viết lại thành 3 phiên bản
   2. Parallel Search — Qdrant + ES + Neo4j (top_k mỗi DB)
   3. RRF Merge      — Gộp → top FINAL_TOP_K bằng Reciprocal Rank Fusion
   4. Context Expand — Lấy L2 full text từ PostgreSQL (dùng cho LLM)
   5. Parent Sources — Gom L2 → L1 chunk cha (dùng cho hiển thị)
-  6. Generate       — Groq LLM sinh câu trả lời
+  6. Generate       — LLM sinh câu trả lời
   7. Log            — Ghi search_logs
 """
 
@@ -19,13 +19,12 @@ from db.meta_db    import MetaDB
 from db.vector_db  import VectorDB
 from db.keyword_db import KeywordDB
 from db.graph_db   import GraphDB
-from core.embedder import embed_text
+from core.embedder import embed_query
 from llm.client    import AsyncLLMClient
 from llm.prompts   import (QUERY_REWRITE_SYSTEM, QUERY_REWRITE_USER,
                             ANSWER_SYSTEM, ANSWER_USER)
 from config        import SEARCH_TOP_K, FINAL_TOP_K, RRF_K, SOURCE_MIN_RRF
 
-# Display-only guardrail: do not show very weak sources in the citations panel.
 SOURCE_DISPLAY_MIN_RRF = max(SOURCE_MIN_RRF, 0.02)
 
 
@@ -55,7 +54,7 @@ async def rewrite_query(query: str, llm: AsyncLLMClient) -> dict:
 # BƯỚC 2: Parallel Search
 # ─────────────────────────────────────────────────────────────────────────────
 def search_qdrant(vector_db: VectorDB, query_text: str, top_k: int) -> list:
-    return vector_db.search(embed_text(query_text), top_k=top_k)
+    return vector_db.search(embed_query(query_text), top_k=top_k)
 
 def search_es(kw_db: KeywordDB, query_text: str, top_k: int) -> list:
     return kw_db.search(query_text, top_k=top_k)
@@ -69,6 +68,10 @@ def search_neo4j(graph_db: GraphDB, query_text: str, top_k: int) -> list:
 # BƯỚC 3: RRF Merge
 # ─────────────────────────────────────────────────────────────────────────────
 def rrf_merge(results_per_db: list, k: int = RRF_K, top_n: int = FINAL_TOP_K) -> list:
+    """
+    Gộp kết quả từ nhiều DB bằng Reciprocal Rank Fusion.
+    Chỉ giữ chunk_id + title để display — full text fetch từ PostgreSQL sau.
+    """
     scores: dict[str, float] = {}
     meta:   dict[str, dict]  = {}
 
@@ -78,10 +81,9 @@ def rrf_merge(results_per_db: list, k: int = RRF_K, top_n: int = FINAL_TOP_K) ->
             scores[cid] = scores.get(cid, 0.0) + 1.0 / (k + rank)
             if cid not in meta:
                 meta[cid] = {
-                    "chunk_id":   cid,
-                    "title":      item.get("title", ""),
-                    "clean_text": item.get("clean_text", ""),
-                    "sources":    [],
+                    "chunk_id": cid,
+                    "title":    item.get("title", ""),
+                    "sources":  [],
                 }
             meta[cid]["sources"].append(item.get("source", "?"))
 
@@ -93,7 +95,7 @@ def rrf_merge(results_per_db: list, k: int = RRF_K, top_n: int = FINAL_TOP_K) ->
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# BƯỚC 4: Context Expand  (L2 chunks → dùng cho LLM generate)
+# BƯỚC 4: Context Expand  (fetch full text từ PostgreSQL)
 # ─────────────────────────────────────────────────────────────────────────────
 async def expand_context(top_chunks: list, meta_db: MetaDB) -> list:
     chunk_ids = [c["chunk_id"] for c in top_chunks]
@@ -121,7 +123,7 @@ async def expand_context(top_chunks: list, meta_db: MetaDB) -> list:
         entry = {
             "chunk_id":     cid,
             "title":        pg.get("title")      or chunk.get("title", ""),
-            "clean_text":   pg.get("clean_text") or chunk.get("clean_text", ""),
+            "clean_text":   pg.get("clean_text", ""),
             "summary":      pg.get("summary", ""),
             "parent_id":    pg.get("parent_id", ""),
             "parent_title": pg.get("parent_title", ""),
@@ -154,13 +156,6 @@ def _heading_from_text(text: str) -> str:
 
 async def get_parent_sources(top_chunks: list, expanded: list,
                               meta_db: MetaDB) -> list:
-    """
-    Gom L2 chunks → L1 parent.
-    Lọc:
-      • best_rrf < SOURCE_MIN_RRF → bỏ (trừ khi là top-1 toàn bộ kết quả)
-      • clean_text rỗng → bỏ
-    Sắp xếp theo thứ tự xuất hiện trong văn bản (seq_no tăng dần).
-    """
     expanded_map = {c["chunk_id"]: c for c in expanded}
     parent_groups: dict[str, dict] = {}
 
@@ -169,9 +164,6 @@ async def get_parent_sources(top_chunks: list, expanded: list,
         info = expanded_map.get(cid, chunk)
         pid  = info.get("parent_id")
 
-        # Only show chapter-level sources derived from L2 chunks.
-        # If a hit has no parent_id (typically doc header/orphan chunk), keep it
-        # for LLM context but exclude from the displayed source list.
         if not pid:
             continue
 
@@ -196,10 +188,8 @@ async def get_parent_sources(top_chunks: list, expanded: list,
             chunk.get("rrf_score", 0.0),
         )
 
-    # Xác định top-1 rrf để luôn giữ lại dù điểm thấp
     top1_rrf = max((g["best_rrf"] for g in parent_groups.values()), default=0)
 
-    # Fetch L1 parents từ PostgreSQL
     parent_rows = await meta_db.get_parent_chunks(list(parent_groups.keys()))
     parent_map  = {r["chunk_id"]: r for r in parent_rows}
 
@@ -207,14 +197,11 @@ async def get_parent_sources(top_chunks: list, expanded: list,
     for pid, group in parent_groups.items():
         rrf = group["best_rrf"]
 
-        # ── Lọc nguồn không đủ liên quan ────────────────────────────────────
-        # Giữ lại nếu: rrf đủ ngưỡng HOẶC là kết quả tốt nhất (top-1)
         if rrf < SOURCE_DISPLAY_MIN_RRF and rrf < top1_rrf:
             continue
 
         p = parent_map.get(pid, {})
 
-        # Bỏ chunk không có nội dung (header rỗng, lỗi data)
         content = (p.get("clean_text") or "").strip()
         if not content:
             continue
@@ -223,7 +210,6 @@ async def get_parent_sources(top_chunks: list, expanded: list,
         if not title:
             continue
 
-        # Deduplicate matched_l2 titles
         seen_t: set[str] = set()
         unique_l2 = []
         for m in group["matched_l2"]:
@@ -243,7 +229,6 @@ async def get_parent_sources(top_chunks: list, expanded: list,
             "matched_l2":  unique_l2,
         })
 
-    # Sắp xếp theo vị trí trong văn bản
     def _seq_key(e):
         try:
             return int(e["seq_no"])
@@ -282,7 +267,7 @@ async def generate_answer(query: str, context_chunks: list,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Hiển thị nguồn — theo L1 chunk cha đã lọc
+# Hiển thị nguồn
 # ─────────────────────────────────────────────────────────────────────────────
 def _print_sources(parent_sources: list):
     n = len(parent_sources)
@@ -370,7 +355,6 @@ async def search(query: str, verbose: bool = True) -> dict:
             print("\n[4/5] Context expand + generate...")
         expanded       = await expand_context(top_chunks, meta_db)
         parent_sources = await get_parent_sources(top_chunks, expanded, meta_db)
-        # Prefer L1 parent context for answer completeness; fallback to L2 if empty.
         llm_context    = parent_sources if parent_sources else expanded
         answer         = await generate_answer(query, llm_context, llm)
 

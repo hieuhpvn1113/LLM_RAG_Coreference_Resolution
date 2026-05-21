@@ -1,10 +1,10 @@
 # core/enricher.py — LLM Enrichment cho mỗi Level 2 chunk
 """
-Gọi Groq API để sinh metadata phong phú cho mỗi chunk:
+Gọi Local LLM để sinh metadata phong phú cho mỗi chunk:
   - title, summary, keywords, entities, relations, hypothetical_questions
 
-Rate limit Groq free tier: 30 req/phút (~2s/req).
-Khi nhận 429, đọc header Retry-After và đợi đúng thời gian yêu cầu.
+Không có rate limit với local LLM — không cần delay giữa các request.
+Chỉ retry khi gặp lỗi thật sự (network, timeout, JSON lỗi).
 """
 
 import json
@@ -15,10 +15,6 @@ import httpx
 
 from llm.client import AsyncLLMClient
 from llm.prompts import ENRICHMENT_SYSTEM, ENRICHMENT_USER
-
-# Groq free tier: 30 RPM → cần cách nhau ít nhất 2s
-# ingestor gọi enrich_chunk tuần tự → đặt min delay ở đây luôn
-_MIN_DELAY_SECONDS = 2.2   # buffer nhỏ trên mức 2s
 
 
 def _parse_llm_json(raw: str) -> dict:
@@ -96,7 +92,7 @@ def _validate_enrichment(data: dict) -> dict:
 def _retry_after(exc: Exception) -> float | None:
     """
     Đọc header Retry-After từ HTTPStatusError 429.
-    Trả về số giây cần đợi, hoặc None nếu không tìm thấy.
+    Trả về số giây cần đợi, hoặc None nếu không phải lỗi 429.
     """
     if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429:
         header = exc.response.headers.get("retry-after") or \
@@ -106,15 +102,15 @@ def _retry_after(exc: Exception) -> float | None:
                 return float(header)
             except ValueError:
                 pass
-        return 60.0   # fallback an toàn nếu không có header
+        return 30.0   # fallback nếu server không trả header
     return None
 
 
 async def enrich_chunk(chunk_text: str, llm: AsyncLLMClient,
                        max_retries: int = 5) -> dict:
     """
-    Enrich 1 chunk text qua Groq API.
-    Tự động đợi đúng thời gian khi bị 429 Rate Limit.
+    Enrich 1 chunk text qua Local LLM.
+    Retry khi gặp lỗi, không có delay cố định giữa các request thành công.
     """
     MAX_CHARS = 3000
     if len(chunk_text) > MAX_CHARS:
@@ -131,24 +127,21 @@ async def enrich_chunk(chunk_text: str, llm: AsyncLLMClient,
             )
             data = _parse_llm_json(raw)
             if data:
-                # Delay tối thiểu trước khi trả về → bảo vệ caller tiếp theo
-                await asyncio.sleep(_MIN_DELAY_SECONDS)
                 return _validate_enrichment(data)
 
             print(f"\n    ⚠️  JSON rỗng attempt {attempt}/{max_retries}, raw: {raw[:80]!r}")
             if attempt < max_retries:
-                await asyncio.sleep(_MIN_DELAY_SECONDS)
+                await asyncio.sleep(1.0)
 
         except Exception as e:
             wait = _retry_after(e)
             if wait is not None:
-                # 429 — đợi đúng theo Retry-After
                 print(f"\n    ⏳ Rate limit (429) — đợi {wait:.0f}s rồi retry [{attempt}/{max_retries}]...")
-                await asyncio.sleep(wait + 1)   # +1s buffer
+                await asyncio.sleep(wait + 1)
             else:
                 print(f"\n    ⚠️  LLM error attempt {attempt}/{max_retries}: {type(e).__name__}: {e}")
                 if attempt < max_retries:
-                    await asyncio.sleep(_MIN_DELAY_SECONDS * attempt)
+                    await asyncio.sleep(1.0 * attempt)
 
     print("    ⚠️  Enrichment thất bại sau tất cả retries — dùng fallback defaults")
     return _default_enrichment()

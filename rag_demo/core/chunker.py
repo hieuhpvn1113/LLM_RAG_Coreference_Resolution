@@ -10,6 +10,10 @@ Chiến lược 2 cấp:
   Level 2 (Paragraph)
     • Chia từng chương thành các chunk con ngữ nghĩa
     • Dùng embedding cosine-distance để tìm điểm cắt tự nhiên
+    • Threshold ADAPTIVE: mean + 0.5*std của distances trong chính section đó
+        → văn bản pháp luật (distances thấp đều) tự chỉnh ngưỡng xuống
+        → văn bản kỹ thuật (distances cao khi chuyển section) tự chỉnh ngưỡng lên
+    • WIN=3: mỗi điểm cắt so sánh trung bình 3 câu bên trái vs 3 câu bên phải
     • Khi 1 unit vượt CHUNK_SIZE_PARAGRAPH token → cắt theo ranh giới CÂU:
         gom câu vào chunk, khi token ≥ limit VÀ vừa kết thúc câu → flush
         → chunk có thể hơi vượt giới hạn, nhưng LUÔN kết thúc bằng câu hoàn chỉnh
@@ -28,7 +32,7 @@ import uuid
 import numpy as np
 import tiktoken
 
-from config import CHUNK_SIZE_PARAGRAPH, SEMANTIC_THRESHOLD
+from config import CHUNK_SIZE_PARAGRAPH
 
 # ---------------------------------------------------------------------------
 # Token helpers
@@ -70,7 +74,7 @@ def _split_sentences(text: str) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Sentence-boundary chunker  ← cốt lõi của logic mới
+# Sentence-boundary chunker
 # ---------------------------------------------------------------------------
 def _split_at_sentence_boundary(sentences: list[str], max_tokens: int) -> list[str]:
     """
@@ -296,7 +300,13 @@ def hierarchical_split(text: str, doc_id: str, source_file: str) -> list:
 def _semantic_units(text: str) -> list[str]:
     """
     Dùng embedding cosine-distance để tìm điểm cắt ngữ nghĩa tự nhiên.
-    Trả về list[str] — mỗi phần tử là 1 nhóm câu có cùng chủ đề.
+
+    Thay đổi so với phiên bản cũ:
+      • WIN=3 (tăng từ 2): so sánh trung bình 3 câu trái vs 3 câu phải
+        → nhạy hơn với chuyển chủ đề thật, ít bị noise câu đơn lẻ
+      • Adaptive threshold = mean + 0.5*std của tất cả distances trong section
+        → tự chỉnh theo từng loại văn bản, không dùng ngưỡng cứng 0.25
+
     Heading mục ("1. ...", "2. ...") KHÔNG bị tách khỏi câu đầu tiên theo sau.
     """
     from core.embedder import embed_batch
@@ -307,23 +317,37 @@ def _semantic_units(text: str) -> list[str]:
 
     vectors = embed_batch(sentences)
 
-    # Tính điểm cắt bằng cosine distance
-    cut_indices: set[int] = set()
-    WIN = 2
+    # ── WIN=3: tính distances tại mọi điểm có thể cắt ──────────────────────
+    WIN = 3
+    scored: list[tuple[int, float]] = []
     for i in range(WIN, len(sentences) - WIN):
         v_left  = np.mean([vectors[j] for j in range(max(0, i - WIN), i)], axis=0)
         v_right = np.mean([vectors[j] for j in range(i, min(len(vectors), i + WIN))], axis=0)
-        if _cosine_distance(v_left.tolist(), v_right.tolist()) > SEMANTIC_THRESHOLD:
-            cut_indices.add(i)
+        dist = _cosine_distance(v_left.tolist(), v_right.tolist())
+        scored.append((i, dist))
+
+    if not scored:
+        return [text]
+
+    # ── Adaptive threshold: mean + 0.5*std của section này ──────────────────
+    dist_vals = np.array([d for _, d in scored])
+    adaptive_threshold = float(np.mean(dist_vals) + 0.5 * np.std(dist_vals))
+
+    print(f"[chunker]   adaptive_threshold={adaptive_threshold:.3f} "
+          f"(mean={np.mean(dist_vals):.3f}, std={np.std(dist_vals):.3f}, "
+          f"n_candidates={len(scored)})")
+
+    # ── Xác định điểm cắt ───────────────────────────────────────────────────
+    cut_indices: set[int] = {i for i, d in scored if d > adaptive_threshold}
 
     # Không cắt ngay SAU heading mục — heading phải đi cùng câu đầu của đoạn nó dẫn
     protected: set[int] = set()
     for i in cut_indices:
-        if _is_sub_heading(sentences[i - 1]):   # câu trước điểm cắt là heading → bảo vệ
+        if _is_sub_heading(sentences[i - 1]):
             protected.add(i)
     cut_indices -= protected
 
-    # Tạo groups từ cut_indices
+    # ── Tạo groups từ cut_indices ────────────────────────────────────────────
     groups: list[list[str]] = []
     start = 0
     for cut in sorted(cut_indices):
@@ -350,7 +374,7 @@ def _semantic_units(text: str) -> list[str]:
 def semantic_split(section: dict, doc_id: str) -> list:
     """
     Chia L1 section thành L2 chunks:
-      1. Dùng cosine-distance để tạo semantic units
+      1. Dùng cosine-distance (adaptive threshold, WIN=3) để tạo semantic units
       2. Unit nào ≤ CHUNK_SIZE_PARAGRAPH → 1 chunk
       3. Unit nào > CHUNK_SIZE_PARAGRAPH → dùng _split_at_sentence_boundary:
             gom câu cho đến khi token ≥ limit VÀ vừa kết thúc câu → flush
@@ -380,7 +404,7 @@ def semantic_split(section: dict, doc_id: str) -> list:
 
     print(f"[chunker] Semantic split section {parent_seq} ({count_tokens(text)} tokens)")
 
-    # Bước 1: chia thành semantic units
+    # Bước 1: chia thành semantic units (adaptive threshold + WIN=3)
     units = _semantic_units(text)
     if not units:
         units = [text]
@@ -393,7 +417,6 @@ def semantic_split(section: dict, doc_id: str) -> list:
         if count_tokens(unit) <= CHUNK_SIZE_PARAGRAPH:
             final_texts.append(unit)
         else:
-            # Đơn vị quá dài → chia theo câu, flush tại ranh giới câu
             sents = _split_sentences(unit)
             sub_chunks = _split_at_sentence_boundary(sents, CHUNK_SIZE_PARAGRAPH)
             final_texts.extend(sub_chunks)

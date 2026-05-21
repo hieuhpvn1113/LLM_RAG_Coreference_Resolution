@@ -10,8 +10,8 @@ Pipeline:
   7.  Insert L2 chunks (null links trước, update links sau)
   8.  LLM Enrichment: title, summary, keywords, entities, hypo_questions
   9.  Update enrichment vào PostgreSQL
-  10. Embed Level 2 chunks (intfloat/multilingual-e5-base, batch)
-  11. Write → Qdrant + Elasticsearch + Neo4j
+  10. Embed Level 2 chunks (intfloat/multilingual-e5-large, batch)
+  11. Write → Qdrant (vector + metadata nhỏ) + ES (inverted index) + Neo4j (graph)
   12. Finalize (status='ready')
 """
 
@@ -158,9 +158,6 @@ async def ingest_file(file_path: str, force: bool = False) -> str:
         await _insert_chunks_then_link(meta_db, all_l2_chunks)
 
         # ── 8+9. LLM Enrichment ───────────────────────────────────────────────
-        # Groq free tier: 30 req/phút.
-        # Delay tối thiểu (2.2s) được xử lý bên trong enrich_chunk().
-        # Không cần sleep thủ công ở đây nữa — tránh cộng dồn delay không cần thiết.
         print(f"\n[5/7] LLM Enrichment ({len(all_l2_chunks)} chunks)...")
         enriched_chunks = []
         for i, chunk in enumerate(all_l2_chunks, 1):

@@ -1,11 +1,12 @@
 # db/keyword_db.py — Elasticsearch Keyword DB client
 """
-Lưu trữ:
-  - clean_text, title, summary    : full-text search (BM25)
+Lưu trữ để search (inverted index):
+  - clean_text, title, summary    : full-text BM25
   - keywords                      : keyword match
-  - hypothetical_questions        : boosted x2 — lợi thế lớn nhất của keyword search
+  - hypothetical_questions        : boosted x2
   - level, seq_no                 : filter / sort
 
+Sau khi tìm được chunk_id, full text lấy từ PostgreSQL — không trả về ở đây.
 Chỉ index Level 2 (paragraph).
 """
 
@@ -13,7 +14,6 @@ from elasticsearch import Elasticsearch, helpers
 from config import ES_URL, ES_INDEX
 
 
-# Mapping chi tiết — boost hypothetical_questions khi search
 _INDEX_MAPPING = {
     "mappings": {
         "properties": {
@@ -40,7 +40,6 @@ _INDEX_MAPPING = {
     },
 }
 
-# Headers tương thích với ES v8 khi dùng client v9
 _COMPAT_HEADERS = {
     "Accept":       "application/json",
     "Content-Type": "application/json",
@@ -53,13 +52,11 @@ class KeywordDB:
         self.client: Elasticsearch | None = None
 
     def connect(self):
-        # headers override để tránh lỗi version mismatch (client v9 vs server v8)
         self.client = Elasticsearch(ES_URL, headers=_COMPAT_HEADERS)
         info = self.client.info()
         print(f"✅ Elasticsearch connected: {ES_URL} (v{info['version']['number']})")
 
     def ensure_index(self):
-        """Tạo index với mapping nếu chưa có."""
         if not self.client.indices.exists(index=ES_INDEX):
             self.client.indices.create(index=ES_INDEX, body=_INDEX_MAPPING)
             print(f"  Created ES index: '{ES_INDEX}'")
@@ -69,7 +66,7 @@ class KeywordDB:
     # ── Write ─────────────────────────────────────────────────────────────────
 
     def index_chunk(self, chunk: dict):
-        """Index 1 chunk vào Elasticsearch (upsert by chunk_id)."""
+        """Index 1 chunk — lưu full text để ES xây inverted index cho BM25."""
         self.client.index(
             index=ES_INDEX,
             id=chunk["chunk_id"],
@@ -88,7 +85,7 @@ class KeywordDB:
         )
 
     def index_batch(self, chunks: list):
-        """Bulk index nhiều chunks cùng lúc."""
+        """Bulk index nhiều chunks."""
         actions = [
             {
                 "_index": ES_INDEX,
@@ -117,7 +114,10 @@ class KeywordDB:
     # ── Search ────────────────────────────────────────────────────────────────
 
     def search(self, query: str, top_k: int = 3, doc_id: str | None = None) -> list:
-        """BM25 multi-field search với hypothetical_questions boost x2."""
+        """
+        BM25 multi-field search — trả về chunk_id + score + title.
+        Full text KHÔNG trả về ở đây — fetch từ PostgreSQL sau khi có chunk_id.
+        """
         must_clauses = [
             {
                 "multi_match": {
@@ -145,17 +145,15 @@ class KeywordDB:
         resp = self.client.search(index=ES_INDEX, body=body)
         return [
             {
-                "chunk_id":   h["_source"]["chunk_id"],
-                "score":      h["_score"],
-                "title":      h["_source"].get("title", ""),
-                "clean_text": h["_source"].get("clean_text", ""),
-                "source":     "elasticsearch",
+                "chunk_id": h["_source"]["chunk_id"],
+                "score":    h["_score"],
+                "title":    h["_source"].get("title", ""),
+                "source":   "elasticsearch",
             }
             for h in resp["hits"]["hits"]
         ]
 
     def delete_by_doc(self, doc_id: str):
-        """Xóa tất cả chunks của 1 document."""
         self.client.delete_by_query(
             index=ES_INDEX,
             body={"query": {"term": {"doc_id": doc_id}}},

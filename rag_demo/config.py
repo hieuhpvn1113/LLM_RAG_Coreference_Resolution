@@ -17,7 +17,8 @@ EMBED_MODEL = "intfloat/multilingual-e5-large"   # 1024 dims
 
 # ── Chunking ────────────────────────────────────────────────
 CHUNK_SIZE_PARAGRAPH = 512    # token — soft limit, flush tại ranh giới câu
-SEMANTIC_THRESHOLD   = 0.25   # ngưỡng cosine distance để cắt semantic unit
+# SEMANTIC_THRESHOLD đã bỏ — chunker.py tự tính adaptive threshold
+# theo mean + 0.5*std của cosine distances trong từng section
 
 # ── Hypothetical Questions ──────────────────────────────────
 NUM_HYPO_QUESTIONS = 5
