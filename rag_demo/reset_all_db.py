@@ -225,4 +225,8 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        # Bỏ qua KeyboardInterrupt giả do asyncio cleanup trên Windows/Python 3.12
+        pass

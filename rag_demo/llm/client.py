@@ -1,31 +1,25 @@
-# llm/client.py — Groq API client (OpenAI-compatible)
+# llm/client.py — Local LLM client (OpenAI-compatible)
 """
-Tất cả LLM call đều đi qua Groq API.
-Endpoint: https://api.groq.com/openai/v1
-Model mặc định: llama-3.3-70b-versatile (free tier, rất nhanh)
+Tất cả LLM call đều đi qua local LLM server (OpenAI-compatible API).
+Model: Gemma 3 12B Q6  (gemma-3-12b-it-Q6_K.gguf)
+Endpoint: http://192.168.1.36:8881/v1
 
 Alias LLMClient / AsyncLLMClient giữ nguyên để không phá code cũ.
 """
 import httpx
-from config import GROQ_API_KEY, GROQ_BASE_URL, GROQ_MODEL
+from config import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
 
 
 def _build_headers() -> dict:
-    if not GROQ_API_KEY:
-        raise RuntimeError(
-            "GROQ_API_KEY chưa được set!\n"
-            "→ Lấy key miễn phí tại https://console.groq.com\n"
-            "→ Thêm vào file .env:  GROQ_API_KEY=gsk_xxxx"
-        )
     return {
         "Content-Type":  "application/json",
-        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Authorization": f"Bearer {LLM_API_KEY}",
     }
 
 
 def _build_payload(system: str, user: str, max_tokens: int) -> dict:
     return {
-        "model":       GROQ_MODEL,
+        "model":       LLM_MODEL,
         "max_tokens":  max_tokens,
         "temperature": 0.1,
         "messages": [
@@ -38,13 +32,13 @@ def _build_payload(system: str, user: str, max_tokens: int) -> dict:
 # ---------------------------------------------------------------------------
 # Sync client
 # ---------------------------------------------------------------------------
-class GroqClient:
+class LocalLLMClient:
     def complete(self, system: str, user: str, max_tokens: int = 2000) -> str:
         resp = httpx.post(
-            f"{GROQ_BASE_URL}/chat/completions",
+            f"{LLM_BASE_URL}/chat/completions",
             headers=_build_headers(),
             json=_build_payload(system, user, max_tokens),
-            timeout=60,
+            timeout=120,  # local model có thể chậm hơn, tăng timeout
         )
         resp.raise_for_status()
         return resp.json()["choices"][0]["message"]["content"]
@@ -53,11 +47,11 @@ class GroqClient:
 # ---------------------------------------------------------------------------
 # Async client
 # ---------------------------------------------------------------------------
-class AsyncGroqClient:
+class AsyncLocalLLMClient:
     async def complete(self, system: str, user: str, max_tokens: int = 2000) -> str:
-        async with httpx.AsyncClient(timeout=60) as client:
+        async with httpx.AsyncClient(timeout=120) as client:
             resp = await client.post(
-                f"{GROQ_BASE_URL}/chat/completions",
+                f"{LLM_BASE_URL}/chat/completions",
                 headers=_build_headers(),
                 json=_build_payload(system, user, max_tokens),
             )
@@ -68,5 +62,5 @@ class AsyncGroqClient:
 # ---------------------------------------------------------------------------
 # Alias — giữ nguyên tên cũ để không cần sửa import ở enricher / retriever
 # ---------------------------------------------------------------------------
-LLMClient      = GroqClient
-AsyncLLMClient = AsyncGroqClient
+LLMClient      = LocalLLMClient
+AsyncLLMClient = AsyncLocalLLMClient

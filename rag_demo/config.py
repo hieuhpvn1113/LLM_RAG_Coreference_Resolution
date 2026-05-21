@@ -4,10 +4,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ── Groq API ────────────────────────────────────────────────
-GROQ_API_KEY   = os.getenv("GROQ_API_KEY", "")
-GROQ_BASE_URL  = "https://api.groq.com/openai/v1"
-GROQ_MODEL     = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+# ── Local LLM (OpenAI-compatible) ───────────────────────────
+LLM_API_KEY   = os.getenv("LLM_API_KEY", "dummy")
+LLM_BASE_URL  = os.getenv("LLM_BASE_URL", "http://192.168.1.36:8881/v1")
+LLM_MODEL     = os.getenv("LLM_MODEL", "gemma-3-12b-it-Q6_K.gguf")
 
 # ── Chunking mode ───────────────────────────────────────────
 CHUNKING_MODE = os.getenv("CHUNKING_MODE", "llm")

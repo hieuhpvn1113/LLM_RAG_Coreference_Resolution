@@ -370,7 +370,9 @@ async def search(query: str, verbose: bool = True) -> dict:
             print("\n[4/5] Context expand + generate...")
         expanded       = await expand_context(top_chunks, meta_db)
         parent_sources = await get_parent_sources(top_chunks, expanded, meta_db)
-        answer         = await generate_answer(query, expanded, llm)
+        # Prefer L1 parent context for answer completeness; fallback to L2 if empty.
+        llm_context    = parent_sources if parent_sources else expanded
+        answer         = await generate_answer(query, llm_context, llm)
 
         latency_ms = int((time.time() - t0) * 1000)
 
