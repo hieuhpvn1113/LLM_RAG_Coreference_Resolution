@@ -20,6 +20,18 @@ CHUNK_SIZE_PARAGRAPH = 512    # token — soft limit, flush tại ranh giới c�
 # SEMANTIC_THRESHOLD đã bỏ — chunker.py tự tính adaptive threshold
 # theo mean + 0.5*std của cosine distances trong từng section
 
+# ── Coreference Resolution ──────────────────────────────────
+# Bật/tắt Coref Pre-processing trước Semantic Split
+# Tác dụng: L2 clean_text được resolve tham chiếu → cắt chuẩn hơn, embed tốt hơn
+# L1 raw_text / clean_text KHÔNG thay đổi → LLM vẫn đọc văn gốc
+COREF_ENABLED = os.getenv("COREF_ENABLED", "true").lower() == "true"
+
+# Chế độ resolve:
+#   rule   — Rule-based cho văn bản pháp luật VN (nhanh, không cần model, default)
+#   neural — fastcoref multilingual (cần: pip install fastcoref)
+#   both   — Tier 1 (rule) trước, Tier 2 (neural) sau (tốt nhất, chậm nhất)
+COREF_MODE = os.getenv("COREF_MODE", "rule")
+
 # ── Hypothetical Questions ──────────────────────────────────
 NUM_HYPO_QUESTIONS = 5
 

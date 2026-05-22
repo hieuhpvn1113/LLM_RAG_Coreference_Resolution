@@ -1,155 +1,148 @@
-# RAG Demo (Vector + Keyword + Graph)
+﻿# RAG Demo (Vector + Keyword + Graph)
 
-Demo he thong RAG truy xuat du lieu noi bo voi 4 lop luu tru:
-- PostgreSQL: metadata tai lieu/chunk + search logs
-- Qdrant: vector embedding search
-- Elasticsearch: BM25 keyword search
-- Neo4j: entity + relation graph search
+Tai lieu nay mo ta quy trinh khoi dong, test, va kiem tra du lieu theo trang thai code hien tai.
 
-## 1) Cau truc du an
+## 1) Tong quan he thong
 
-```text
-rag_demo/
-  api/                 # FastAPI endpoints: /health, /ingest, /query
-  core/                # chunker, enricher, embedder, ingestor, retriever
-  db/                  # clients cho postgres/qdrant/es/neo4j
-  llm/                 # LLM client + prompts
-  data/                # du lieu mau
-  migrations/          # SQL schema va index
-  main.py              # CLI ingest/query
-  test_connections.py  # smoke test ket noi 4 DB
-  inspect_db.py        # script kiem tra nhanh data da ingest
-  docker-compose.yml
-  .env.example
-```
+RAG su dung 4 tang luu tru:
+- PostgreSQL: metadata document/chunk + search logs
+- Qdrant: vector search
+- Elasticsearch: keyword/BM25 search
+- Neo4j: entity/relation graph
 
 ## 2) Yeu cau
 
 - Python 3.11+ (khuyen nghi 3.12)
 - Docker Desktop
-- API key cho LLM (Groq theo cau hinh trong `.env`)
+- Da cai dependency Python tu `requirements.txt`
 
 ## 3) Cai dat nhanh
 
-```bash
-cd rag_demo
+```powershell
+cd E:\AI_agent\LLM_RAG\rag_demo
 python -m venv venv
-# Windows PowerShell
 .\venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
 
-Tao file env:
+## 4) Cau hinh can luu y
 
-```bash
-copy .env.example .env
+Nguon su that cau hinh: `config.py`
+
+Luu y quan trong ve PostgreSQL:
+- Trong Docker Compose: PostgreSQL map `5433:5432`
+- Neu chay script tu host, nen set `DATABASE_URL` dung port host `5433`, vi du:
+
+```powershell
+$env:DATABASE_URL="postgresql://rag_user:rag_password@localhost:5433/rag_db"
 ```
 
-Mo `.env` va dien cac gia tri can thiet (DB, LLM key, model, ...).
+## 5) Quy trinh khoi dong he thong
 
-## 4) Khoi dong he thong
-
-```bash
+```powershell
+cd E:\AI_agent\LLM_RAG\rag_demo
 docker compose down
-
 docker compose up -d
 ```
 
-Kiem tra ket noi:
+Cac endpoint/GUI de kiem tra service:
+- PostgreSQL: `localhost:5433`
+- pgAdmin: `http://localhost:5050`
+- Qdrant: `http://localhost:6333/dashboard`
+- Elasticsearch: `http://localhost:9200`
+- Kibana: `http://localhost:5601`
+- Neo4j Browser: `http://localhost:7474`
 
-```bash
+## 6) Chay test he thong (smoke test)
+
+Sau khi services len, chay:
+
+```powershell
+cd E:\AI_agent\LLM_RAG\rag_demo
 python test_connections.py
 ```
 
-Neu tat ca OK, ban co the ingest va query.
+Script se test:
+- Ket noi PostgreSQL, Qdrant, Elasticsearch, Neo4j
+- Kiem tra bang PostgreSQL bat buoc: `documents`, `chunks`, `search_logs`
 
-## 5) Nap du lieu (ingest)
+Neu pass 4/4 service thi co the ingest/query.
 
-### Cach 1: CLI
+## 7) Chay ingest va query
 
-```bash
-python main.py ingest data/input.txt
+CLI ingest:
+
+```powershell
+python main.py ingest data\20260429_VNM_Ban_tin_NDT_Q1_2026.pdf
 ```
 
-### Cach 2: API
+CLI query:
 
-Chay server:
+```powershell
+python main.py query "Noi dung chinh cua tai lieu la gi?"
+```
 
-```bash
+API server:
+
+```powershell
 uvicorn api.main:app --reload
 ```
 
-Goi ingest:
+API endpoints:
+- `GET /health`
+- `POST /ingest` body: `{ "file_path": "..." }`
+- `POST /query` body: `{ "query": "...", "verbose": false }`
 
-```bash
-curl -X POST "http://127.0.0.1:8000/ingest" \
-  -H "Content-Type: application/json" \
-  -d '{"file_path":"data/input.txt"}'
-```
+## 8) Kiem tra du lieu nam o dau
 
-## 6) Hoi dap (query)
+### A. Kiem tra bang script tong hop
 
-### CLI
-
-```bash
-python main.py query "RAG la gi?"
-```
-
-### API
-
-```bash
-curl -X POST "http://127.0.0.1:8000/query" \
-  -H "Content-Type: application/json" \
-  -d '{"query":"RAG la gi?", "verbose": true}'
-```
-
-Health check:
-
-```bash
-curl "http://127.0.0.1:8000/health"
-```
-
-## 7) Kiem tra da nap du lieu chua
-
-- Chay script:
-
-```bash
+```powershell
 python inspect_db.py
 ```
 
-- Hoac kiem tra nhanh:
-  - Neo4j Browser: http://localhost:7474
-  - Elasticsearch: http://localhost:9200
-  - Qdrant: http://localhost:6333/dashboard
-  - PostgreSQL: `psql -h localhost -p 5433 -U rag_user -d rag_db`
+Loc theo tung DB:
 
-## 8) Luong test toi thieu de xac nhan hoat dong
+```powershell
+python inspect_db.py --pg
+python inspect_db.py --qdrant
+python inspect_db.py --es
+python inspect_db.py --neo4j
+```
+
+Loc theo document:
+
+```powershell
+python inspect_db.py --doc <doc_id>
+```
+
+### B. Kiem tra tren GUI/endpoint
+
+- PostgreSQL:
+  - pgAdmin: `http://localhost:5050`
+- Qdrant:
+  - Dashboard: `http://localhost:6333/dashboard`
+- Elasticsearch:
+  - API: `http://localhost:9200`
+  - Kibana: `http://localhost:5601`
+- Neo4j:
+  - Browser: `http://localhost:7474`
+
+## 9) Reset du lieu (neu can)
+
+```powershell
+python reset_all_db.py
+python reset_all_db.py --yes
+python reset_all_db.py --pg-only
+python reset_all_db.py --qdrant-only
+python reset_all_db.py --es-only
+python reset_all_db.py --neo4j-only
+```
+
+## 10) Luong E2E khuyen nghi
 
 1. `docker compose up -d`
 2. `python test_connections.py`
-3. `python main.py ingest data/input.txt`
-4. `python main.py query "RAG la gi?"`
+3. `python main.py ingest <file>`
+4. `python main.py query "..."`
 5. `python inspect_db.py`
-
-Neu 5 buoc tren pass, he thong da chay end-to-end.
-
-## 9) Luu y quan trong
-
-- Khong chay `python api/main.py` truc tiep. Dung:
-  - `python -m api.main` hoac
-  - `uvicorn api.main:app --reload`
-- Port PostgreSQL map ra may host la `5433` (khong phai 5432).
-- Lan ingest dau voi tai lieu lon co the cham do embedding + LLM enrichment.
-
-## 10) Lenh huu ich
-
-```bash
-# Xem logs cac service
-docker compose logs -f
-
-# Restart 1 service
-docker compose restart elasticsearch
-
-# Dung he thong
-docker compose down
-```

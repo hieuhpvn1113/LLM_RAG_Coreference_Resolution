@@ -39,12 +39,13 @@ class VectorDB:
                 id=chunk["chunk_id"],
                 vector=vector,
                 payload={
-                    "chunk_id":    chunk["chunk_id"],
-                    "doc_id":      chunk["doc_id"],
-                    "level":       chunk.get("level", 2),
-                    "title":       chunk.get("title", ""),
-                    "source_file": chunk.get("source_file", ""),
-                    "seq_no":      chunk.get("seq_no", "0"),
+                    "chunk_id":         chunk["chunk_id"],
+                    "doc_id":           chunk["doc_id"],
+                    "level":            chunk.get("level", 2),
+                    "title":            chunk.get("title", ""),
+                    "source_file":      chunk.get("source_file", ""),
+                    "seq_no":           chunk.get("seq_no", "0"),
+                    "character_length": len(chunk.get("clean_text", "")),
                 },
             )
             for chunk, vector in zip(chunks, vectors)

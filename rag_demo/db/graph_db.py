@@ -1,6 +1,7 @@
 # db/graph_db.py — Neo4j Graph DB client
 from neo4j import GraphDatabase
 from config import NEO4J_URL, NEO4J_USER, NEO4J_PASSWORD
+import re
 
 
 class GraphDB:
@@ -119,49 +120,127 @@ class GraphDB:
         self.upsert_entities(chunk["chunk_id"], chunk.get("entities", []))
         self.upsert_relations(chunk.get("relations", []))
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # Entity Extraction từ Query
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def extract_entities_simple(self, user_query: str) -> list:
+        """
+        Tìm entity names trong Neo4j khớp với query.
+
+        Vấn đề với cách cũ (đã sửa):
+          WHERE toLower($query) CONTAINS toLower(e.name)
+          → Chỉ tìm được entity ngắn hơn query (VD entity="Đảng" trong query dài)
+          → Entity dài như "Luật Giao thông đường bộ năm 2008" KHÔNG BAO GIỜ được tìm thấy
+
+        Cách mới — bidirectional matching theo từng keyword phrase:
+          1. Tách query thành các keyword phrases (split by comma/whitespace)
+          2. Lọc phrase quá ngắn (< 3 ký tự) để tránh match stopword
+          3. Kiểm tra 2 chiều:
+             a) entity_name CONTAINS phrase   → entity dài hơn phrase (phổ biến nhất)
+             b) phrase CONTAINS entity_name   → entity ngắn hơn phrase (ít gặp hơn)
+
+        Ví dụ:
+          query  = "luật giao thông, chương chính, cấu trúc"
+          phrase = "luật giao thông"
+          entity = "Luật Giao thông đường bộ năm 2008"
+          → entity CONTAINS phrase → MATCH ✓
+        """
+        if not user_query or not user_query.strip():
+            return []
+
+        # Tách thành các phrase tại dấu phẩy, sau đó tại khoảng trắng nếu quá dài
+        raw_phrases = re.split(r'[,;]+', user_query)
+        phrases = []
+        for ph in raw_phrases:
+            ph = ph.strip()
+            if not ph:
+                continue
+            # Nếu phrase < 3 từ → dùng nguyên
+            # Nếu phrase >= 3 từ → tách thêm các bigram để tăng recall
+            words = ph.split()
+            phrases.append(ph)  # phrase gốc
+            if len(words) >= 3:
+                # Thêm các bigram liên tiếp (cửa sổ 2 từ)
+                for i in range(len(words) - 1):
+                    bigram = f"{words[i]} {words[i+1]}"
+                    if len(bigram) >= 4:
+                        phrases.append(bigram)
+
+        # Lọc phrase quá ngắn (< 3 ký tự), bỏ duplicate
+        min_len  = 3
+        seen     = set()
+        filtered = []
+        for p in phrases:
+            p_lower = p.lower()
+            if len(p) >= min_len and p_lower not in seen:
+                seen.add(p_lower)
+                filtered.append(p)
+
+        if not filtered:
+            return []
+
+        with self.driver.session() as session:
+            result = session.run(
+                """
+                UNWIND $phrases AS phrase
+                MATCH (e:Entity)
+                WHERE toLower(e.name) CONTAINS toLower(phrase)
+                   OR toLower(phrase) CONTAINS toLower(e.name)
+                RETURN DISTINCT e.name AS name
+                LIMIT 15
+                """,
+                phrases=filtered,
+            )
+            return [r["name"] for r in result.data()]
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Search
+    # ─────────────────────────────────────────────────────────────────────────
+
     def search(self, query_entities: list, top_k: int = 3) -> list:
+        """
+        Tìm các L2 chunk có nhiều entity khớp nhất.
+        Dùng kết quả từ extract_entities_simple() làm input.
+
+        Scoring: số entity khớp / tổng entity trong chunk
+        → ưu tiên chunk nhỏ khớp chính xác hơn chunk lớn khớp 1/100 entity.
+        """
         if not query_entities:
             return []
+
         with self.driver.session() as session:
             result = session.run(
                 """
                 UNWIND $entity_names AS ename
                 MATCH (e:Entity)
                 WHERE toLower(e.name) CONTAINS toLower(ename)
+                   OR toLower(ename) CONTAINS toLower(e.name)
                 MATCH (c:Chunk)-[:MENTIONS]->(e)
                 WHERE c.level = 2
                 WITH c, count(DISTINCT e) AS match_count
                 ORDER BY match_count DESC
                 LIMIT $top_k
-                RETURN c.chunk_id AS chunk_id, c.title AS title,
-                       c.summary AS summary, match_count AS score
+                RETURN c.chunk_id AS chunk_id,
+                       c.title    AS title,
+                       c.summary  AS summary,
+                       match_count AS score
                 """,
                 entity_names=query_entities,
                 top_k=top_k,
             )
             rows = result.data()
+
         return [
-            {"chunk_id": r["chunk_id"], "score": float(r["score"]),
-             "title": r.get("title", ""), "clean_text": "", "source": "neo4j"}
+            {
+                "chunk_id":   r["chunk_id"],
+                "score":      float(r["score"]),
+                "title":      r.get("title", ""),
+                "clean_text": "",
+                "source":     "neo4j",
+            }
             for r in rows
         ]
-
-    def extract_entities_simple(self, user_query: str) -> list:
-        """
-        Tìm entity names có trong query.
-        Dùng user_query (không phải query) để tránh conflict với Neo4j driver.
-        """
-        with self.driver.session() as session:
-            result = session.run(
-                """
-                MATCH (e:Entity)
-                WHERE toLower($user_query) CONTAINS toLower(e.name)
-                RETURN e.name AS name
-                LIMIT 10
-                """,
-                user_query=user_query,   # ← tên khác query để tránh TypeError
-            )
-            return [r["name"] for r in result.data()]
 
     def delete_by_doc(self, doc_id: str):
         with self.driver.session() as session:

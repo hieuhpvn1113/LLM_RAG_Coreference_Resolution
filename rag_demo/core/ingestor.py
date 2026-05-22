@@ -1,7 +1,7 @@
 # core/ingestor.py — Orchestrate toàn bộ pipeline ingest
 """
 Pipeline:
-  1.  Đọc + clean file text (auto-detect encoding)
+  1.  Đọc file (txt / pdf / docx / xlsx / pptx / html / md) → plain text
   2.  Check duplicate
   3.  Insert Document (status='processing')
   4.  Hierarchical Split → Level 1 Sections
@@ -19,50 +19,16 @@ import asyncio
 import time
 from pathlib import Path
 
-from core.chunker  import hierarchical_split, semantic_split, clean_text
-from core.enricher import enrich_chunk
-from core.embedder import embed_batch
-from db.meta_db    import MetaDB
-from db.vector_db  import VectorDB
-from db.keyword_db import KeywordDB
-from db.graph_db   import GraphDB
-from llm.client    import AsyncLLMClient
-from config        import EMBED_MODEL
-
-
-def _read_text_smart(path: Path) -> str:
-    raw = path.read_bytes()
-    for enc in ('utf-8-sig', 'utf-8'):
-        try:
-            text = raw.decode(enc)
-            print(f"  Encoding detected: {enc}")
-            return text
-        except UnicodeDecodeError:
-            pass
-    try:
-        import chardet
-        result = chardet.detect(raw)
-        detected = result.get('encoding') or ''
-        confidence = result.get('confidence', 0)
-        print(f"  chardet: {detected} (confidence={confidence:.0%})")
-        if detected and confidence > 0.7:
-            try:
-                text = raw.decode(detected)
-                print(f"  Encoding detected: {detected}")
-                return text
-            except (UnicodeDecodeError, LookupError):
-                pass
-    except ImportError:
-        print("  chardet chưa cài — thử các encoding phổ biến")
-    for enc in ('cp1258', 'cp1252', 'latin-1'):
-        try:
-            text = raw.decode(enc)
-            print(f"  Encoding detected (fallback): {enc}")
-            return text
-        except (UnicodeDecodeError, LookupError):
-            pass
-    print("  ⚠️  WARNING: Không xác định được encoding — dùng utf-8 errors=replace")
-    return raw.decode('utf-8', errors='replace')
+from core.chunker     import hierarchical_split, semantic_split, clean_text
+from core.enricher    import enrich_chunk
+from core.embedder    import embed_batch
+from core.file_parser import parse_file                   # ← thêm mới
+from db.meta_db       import MetaDB
+from db.vector_db     import VectorDB
+from db.keyword_db    import KeywordDB
+from db.graph_db      import GraphDB
+from llm.client       import AsyncLLMClient
+from config           import EMBED_MODEL
 
 
 async def _insert_chunks_then_link(meta_db: MetaDB, chunks: list):
@@ -103,9 +69,9 @@ async def ingest_file(file_path: str, force: bool = False) -> str:
     graph_db.connect();    graph_db.ensure_constraints()
 
     try:
-        # ── 1. Đọc file ───────────────────────────────────────────────────────
+        # ── 1. Đọc file (txt / pdf / docx / ...) ─────────────────────────────
         print("\n[1/7] Đọc file...")
-        raw_text = _read_text_smart(path)
+        raw_text = await parse_file(path)            # ← thay _read_text_smart
         text     = clean_text(raw_text)
         print(f"  File size : {path.stat().st_size:,} bytes")
         print(f"  Text len  : {len(text):,} chars")
@@ -211,12 +177,18 @@ async def ingest_file(file_path: str, force: bool = False) -> str:
 
 
 async def ingest_directory(dir_path: str, force: bool = False) -> list:
-    txt_files = list(Path(dir_path).glob('*.txt'))
-    if not txt_files:
-        print(f"Không tìm thấy file .txt trong {dir_path}")
+    """Ingest tất cả file được hỗ trợ trong thư mục."""
+    from core.file_parser import KREUZBERG_EXTENSIONS
+    supported = {".txt"} | KREUZBERG_EXTENSIONS
+    all_files = [
+        f for f in Path(dir_path).iterdir()
+        if f.is_file() and f.suffix.lower() in supported
+    ]
+    if not all_files:
+        print(f"Không tìm thấy file được hỗ trợ trong {dir_path}")
         return []
     doc_ids = []
-    for fp in txt_files:
+    for fp in all_files:
         try:
             doc_ids.append(await ingest_file(str(fp), force=force))
         except Exception as e:
@@ -229,6 +201,7 @@ if __name__ == "__main__":
     force = '--force' in sys.argv
     args  = [a for a in sys.argv[1:] if a != '--force']
     if not args:
-        print("Usage: python -m core.ingestor <file.txt> [--force]")
+        print("Usage: python -m core.ingestor <file> [--force]")
+        print("       file có thể là: .txt .pdf .docx .xlsx .pptx .html .md")
         sys.exit(1)
     asyncio.run(ingest_file(args[0], force=force))
