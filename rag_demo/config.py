@@ -56,8 +56,8 @@ NEO4J_USER     = os.getenv("NEO4J_USER", "neo4j")
 NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "password")
 
 # ── Search ──────────────────────────────────────────────────
-SEARCH_TOP_K  = 8     # số kết quả mỗi DB
-RRF_TOP_K     = 8     # số ứng viên giữ lại sau RRF, trước query-aware rerank
+SEARCH_TOP_K  = 9     # số kết quả mỗi DB
+RRF_TOP_K     = 6     # số ứng viên giữ lại sau RRF, trước query-aware rerank
 FINAL_TOP_K   = 4     # số chunk/parent cuối cùng đưa vào LLM context
 RRF_K         = 60    # hằng số RRF
 

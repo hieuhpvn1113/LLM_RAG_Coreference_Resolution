@@ -10,10 +10,15 @@ Hỗ trợ:
   .md             → Kreuzberg
 
 Output luôn là str thuần (plain text) → đưa thẳng vào hierarchical_split().
+
+Post-processing PDF:
+  _strip_page_headers() loại bỏ các dòng page-header lặp lại do PDF inject
+  (vd: "2 CTCP SỮA VIỆT NAM (VNM) - BẢN TIN NHÀ ĐẦU TƯ QUÝ 1 NĂM 2026")
+  để nội dung chảy liên tục qua các trang, chunker mới cắt đúng ranh giới.
 """
 
-import asyncio
 import os
+import re
 from pathlib import Path
 
 # ── Định dạng Kreuzberg xử lý ────────────────────────────────────────────────
@@ -24,6 +29,55 @@ KREUZBERG_EXTENSIONS = {
     ".html", ".htm",
     ".md",
 }
+
+# ── Pattern page-header inject bởi PDF (lặp mỗi trang) ──────────────────────
+# Dạng: "<số> CTCP SỮA VIỆT NAM..." hoặc các header tương tự
+# Thêm pattern mới vào list nếu gặp loại tài liệu khác
+_PDF_PAGE_HEADER_PATTERNS: list[re.Pattern] = [
+    # "2 CTCP SỮA VIỆT NAM (VNM) - BẢN TIN NHÀ ĐẦU TƯ QUÝ 1 NĂM 2026"
+    re.compile(
+        r'^\s*\d+\s+CTCP\s+S[ỮƯ]A\s+VI[ỆE]T\s+NAM.*$',
+        re.IGNORECASE,
+    ),
+    # Header dạng "Trang X / Y" hoặc "Page X of Y"
+    re.compile(
+        r'^\s*(?:Trang|Page)\s+\d+\s*(?:/|of)\s*\d+\s*$',
+        re.IGNORECASE,
+    ),
+    # Header chỉ gồm số trang đứng một mình trên dòng
+    re.compile(r'^\s*\d{1,4}\s*$'),
+]
+
+
+def _strip_pdf_page_headers(text: str) -> str:
+    """
+    Loại bỏ các dòng page-header lặp lại do PDF inject vào giữa nội dung.
+
+    Nguyên tắc:
+    - Scan từng dòng, nếu khớp bất kỳ pattern nào → bỏ dòng đó
+    - Sau khi xóa dòng header, nối đoạn văn trước và sau để text chảy liền
+      (thay thế blank line thừa bằng đúng 1 blank line)
+    - Giữ nguyên tất cả dòng khác (kể cả dòng trắng cấu trúc đoạn văn)
+
+    Kết quả: chunker nhận text liền mạch, không bị đứt đoạn tại page break.
+    """
+    lines = text.split('\n')
+    cleaned: list[str] = []
+
+    for line in lines:
+        is_header = any(pat.match(line) for pat in _PDF_PAGE_HEADER_PATTERNS)
+        if is_header:
+            print(f"  [file_parser] strip page-header: {line.strip()!r}")
+            # Không thêm dòng này — nội dung tiếp tục chảy liền
+            continue
+        cleaned.append(line)
+
+    result = '\n'.join(cleaned)
+
+    # Collapse chuỗi blank line > 2 thành đúng 2 (1 blank = phân cách đoạn)
+    result = re.sub(r'\n{3,}', '\n\n', result)
+
+    return result.strip()
 
 
 # ── Fallback: đọc .txt với auto-detect encoding ───────────────────────────────
@@ -67,8 +121,11 @@ async def _extract_with_kreuzberg(path: Path) -> str:
     """
     Dùng Kreuzberg để trích xuất text từ PDF / DOCX / XLSX / PPTX / HTML / MD.
     - output_format="plain"            → giữ căn chỉnh bảng số liệu
-    - include_document_structure=True  → giữ heading hierarchy (heading sẽ nằm trên dòng riêng)
+    - include_document_structure=True  → giữ heading hierarchy
     - KHÔNG dùng ChunkingConfig        → để chunker.py của dự án tự xử lý
+
+    Với PDF: sau khi extract, gọi _strip_pdf_page_headers() để loại bỏ
+    các dòng header lặp lại giữa các trang → text chảy liên tục.
     """
     try:
         import kreuzberg
@@ -104,6 +161,13 @@ async def _extract_with_kreuzberg(path: Path) -> str:
     # Chuẩn hóa line break
     text = text.replace(os.linesep, "\n").replace("\r", "\n")
     print(f"  Kreuzberg OK — {len(text):,} chars extracted")
+
+    # ── Post-processing PDF: strip page headers ──────────────────────────────
+    if path.suffix.lower() == ".pdf":
+        text_before = len(text)
+        text = _strip_pdf_page_headers(text)
+        print(f"  Page-header strip: {text_before - len(text):+,} chars removed")
+
     return text
 
 
@@ -116,7 +180,7 @@ async def parse_file(path: Path) -> str:
         path: Path tới file cần đọc.
 
     Returns:
-        str: Toàn bộ nội dung văn bản của file.
+        str: Toàn bộ nội dung văn bản của file (page headers đã được strip với PDF).
 
     Raises:
         FileNotFoundError: File không tồn tại.

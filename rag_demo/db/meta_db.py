@@ -139,15 +139,14 @@ class MetaDB:
             )
 
     async def get_context(self, chunk_ids: list) -> list:
-        """Lấy full context L2 chunks, JOIN với parent để có parent_title."""
+        """Lấy parent_id của L2 chunks — dùng để suy ra L1, không lấy text."""
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT c.chunk_id::TEXT, c.doc_id::TEXT, c.level, c.seq_no,
-                       c.clean_text, c.title, c.summary, c.token_count,
-                       c.source_file, c.char_start, c.char_end,
+                SELECT c.chunk_id::TEXT, c.level, c.seq_no,
+                       c.title, c.source_file, c.token_count,
                        c.parent_id::TEXT, c.prev_id::TEXT, c.next_id::TEXT,
-                       p.clean_text AS parent_text, p.title AS parent_title
+                       p.title AS parent_title
                 FROM chunks c
                 LEFT JOIN chunks p ON c.parent_id = p.chunk_id
                 WHERE c.chunk_id = ANY($1::UUID[])
@@ -159,13 +158,13 @@ class MetaDB:
 
     async def get_parent_chunks(self, parent_ids: list) -> list:
         """
-        Lấy L1 chunks (chunk cha) theo danh sách parent_id.
-        Dùng để hiển thị nguồn dữ liệu theo chương thay vì theo chunk con.
+        Lấy L1 chunks theo danh sách parent_id.
+        Trả về raw_text (văn bản gốc) để đưa vào LLM context.
         """
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT chunk_id::TEXT, seq_no, clean_text, title,
+                SELECT chunk_id::TEXT, seq_no, raw_text, title,
                        source_file, token_count, level
                 FROM chunks
                 WHERE chunk_id = ANY($1::UUID[])

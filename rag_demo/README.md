@@ -19,9 +19,9 @@ RAG su dung 4 tang luu tru:
 ## 3) Cai dat nhanh
 
 ```powershell
-cd E:\AI_agent\LLM_RAG\rag_demo
 python -m venv venv
 .\venv\Scripts\Activate.ps1
+cd rag_demo
 pip install -r requirements.txt
 ```
 

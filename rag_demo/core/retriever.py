@@ -4,10 +4,9 @@ Pipeline:
   1. Query Rewrite  — LLM viết lại thành 3 phiên bản
   2. Parallel Search — Qdrant + ES + Neo4j (top_k mỗi DB)
   3. RRF Merge      — Gộp → top FINAL_TOP_K bằng Reciprocal Rank Fusion
-  4. Context Expand — Lấy L2 full text từ PostgreSQL (dùng cho LLM)
-  5. Parent Sources — Gom L2 → L1 chunk cha (dùng cho hiển thị)
-  6. Generate       — LLM sinh câu trả lời
-  7. Log            — Ghi search_logs
+  4. Resolve L1     — Lấy parent_id từ L2 chunks → fetch L1 raw_text từ PostgreSQL
+  5. Generate       — LLM sinh câu trả lời từ L1 raw_text (full, không trim)
+  6. Log            — Ghi search_logs
 """
 
 import asyncio
@@ -39,14 +38,16 @@ def _normalize_text(text: str) -> str:
 def _score_parent_for_query(query: str, entry: dict) -> float:
     q = _normalize_text(query)
     title = _normalize_text(entry.get("title", ""))
-    text = _normalize_text(entry.get("clean_text", ""))
+    text = _normalize_text(entry.get("raw_text", ""))
     matched_titles = " ".join(m.get("title", "") for m in entry.get("matched_l2", []))
     matched_titles = _normalize_text(matched_titles)
 
     strong_phrases = [
-        "doanh thu thuan hop nhat",
-        "q1 2026",
-        "vinamilk",
+        "yeu to",
+        "hai yeu to",
+        "chi phi hoat dong",
+        "doanh thu tang truong",
+        "bien loi nhuan",
     ]
     score = 0.0
     for phrase in strong_phrases:
@@ -68,40 +69,6 @@ def _score_parent_for_query(query: str, entry: dict) -> float:
             score += 0.20
 
     score += float(entry.get("best_rrf", 0.0)) * 20.0
-    return score
-
-
-def _score_l2_for_query(query: str, chunk: dict) -> float:
-    q = _normalize_text(query)
-    title = _normalize_text(chunk.get("title", ""))
-    text = _normalize_text(chunk.get("clean_text", ""))
-    score = float(chunk.get("rrf_score", 0.0)) * 10.0
-
-    strong_phrases = [
-        "eps",
-        "thu nhap moi co phieu",
-        "bao cao tai chinh",
-        "q1 2026",
-        "vinamilk",
-    ]
-    for phrase in strong_phrases:
-        if phrase in title:
-            score += 4.0
-        if phrase in text:
-            score += 3.0
-
-    for token in set(q.split()):
-        if len(token) < 3:
-            continue
-        if token in title:
-            score += 0.30
-        if token in text:
-            score += 0.15
-        if token in {"eps", "loi", "nhuan", "doanh", "thu", "phieu"}:
-            if token in title:
-                score += 0.80
-            if token in text:
-                score += 0.60
     return score
 
 
@@ -145,10 +112,6 @@ def search_neo4j(graph_db: GraphDB, query_text: str, top_k: int) -> list:
 # BƯỚC 3: RRF Merge
 # ─────────────────────────────────────────────────────────────────────────────
 def rrf_merge(results_per_db: list, k: int = RRF_K, top_n: int = RRF_TOP_K) -> list:
-    """
-    Gộp kết quả từ nhiều DB bằng Reciprocal Rank Fusion.
-    Chỉ giữ chunk_id + title để display — full text fetch từ PostgreSQL sau.
-    """
     scores: dict[str, float] = {}
     meta:   dict[str, dict]  = {}
 
@@ -172,75 +135,26 @@ def rrf_merge(results_per_db: list, k: int = RRF_K, top_n: int = RRF_TOP_K) -> l
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# BƯỚC 4: Context Expand  (fetch full text từ PostgreSQL)
+# BƯỚC 4: Resolve L1 — lấy parent_id từ L2, fetch L1 raw_text từ PostgreSQL
 # ─────────────────────────────────────────────────────────────────────────────
-async def expand_context(top_chunks: list, meta_db: MetaDB) -> list:
+async def resolve_l1_context(top_chunks: list, meta_db: MetaDB) -> tuple[list, list]:
+    """
+    Nhận top L2 chunks sau RRF.
+    1. Fetch metadata L2 (chỉ lấy parent_id, không lấy text L2).
+    2. Suy ra danh sách parent_id (L1).
+    3. Fetch L1 raw_text từ PostgreSQL.
+    4. Trả về (l2_meta_list, parent_sources).
+    """
     chunk_ids = [c["chunk_id"] for c in top_chunks]
-    pg_rows   = await meta_db.get_context(chunk_ids)
-    pg_map    = {r["chunk_id"]: r for r in pg_rows}
+    l2_rows   = await meta_db.get_context(chunk_ids)
+    l2_map    = {r["chunk_id"]: r for r in l2_rows}
 
-    extra_ids = set()
-    for row in pg_rows:
-        if (row.get("token_count") or 999) < 150:
-            for fld in ("prev_id", "next_id"):
-                if row.get(fld):
-                    extra_ids.add(row[fld])
-    new_ids = [eid for eid in extra_ids if eid not in pg_map]
-    if new_ids:
-        for r in await meta_db.get_context(new_ids):
-            pg_map[r["chunk_id"]] = r
-
-    final, seen = [], set()
-    for chunk in top_chunks:
-        cid = chunk["chunk_id"]
-        if cid in seen:
-            continue
-        seen.add(cid)
-        pg = pg_map.get(cid, {})
-        entry = {
-            "chunk_id":     cid,
-            "title":        pg.get("title")      or chunk.get("title", ""),
-            "clean_text":   pg.get("clean_text", ""),
-            "summary":      pg.get("summary", ""),
-            "parent_id":    pg.get("parent_id", ""),
-            "parent_title": pg.get("parent_title", ""),
-            "seq_no":       pg.get("seq_no", ""),
-            "source_file":  pg.get("source_file", ""),
-            "rrf_score":    chunk.get("rrf_score", 0),
-            "sources":      chunk.get("sources", []),
-        }
-        if (pg.get("token_count") or 999) < 150:
-            for fld in ("prev_id", "next_id"):
-                extra_id = pg.get(fld)
-                if extra_id and extra_id not in seen:
-                    extra_pg = pg_map.get(extra_id, {})
-                    if extra_pg.get("clean_text"):
-                        entry["clean_text"] += "\n\n" + extra_pg["clean_text"]
-                        seen.add(extra_id)
-        final.append(entry)
-    return final
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# BƯỚC 5: Parent Sources  (gom L2 → L1, dùng cho hiển thị)
-# ─────────────────────────────────────────────────────────────────────────────
-def _heading_from_text(text: str) -> str:
-    if not text:
-        return ""
-    first = text.strip().split('\n')[0].strip()
-    return first[:120]
-
-
-async def get_parent_sources(top_chunks: list, expanded: list,
-                              meta_db: MetaDB) -> list:
-    expanded_map = {c["chunk_id"]: c for c in expanded}
+    # Gom nhóm L2 theo parent_id
     parent_groups: dict[str, dict] = {}
-
     for chunk in top_chunks:
         cid  = chunk["chunk_id"]
-        info = expanded_map.get(cid, chunk)
+        info = l2_map.get(cid, {})
         pid  = info.get("parent_id")
-
         if not pid:
             continue
 
@@ -267,19 +181,23 @@ async def get_parent_sources(top_chunks: list, expanded: list,
 
     top1_rrf = max((g["best_rrf"] for g in parent_groups.values()), default=0)
 
+    # Fetch L1 raw_text
     parent_rows = await meta_db.get_parent_chunks(list(parent_groups.keys()))
     parent_map  = {r["chunk_id"]: r for r in parent_rows}
+
+    def _heading_from_text(text: str) -> str:
+        if not text:
+            return ""
+        return text.strip().split('\n')[0].strip()[:120]
 
     result = []
     for pid, group in parent_groups.items():
         rrf = group["best_rrf"]
-
         if rrf < SOURCE_DISPLAY_MIN_RRF and rrf < top1_rrf:
             continue
 
         p = parent_map.get(pid, {})
-
-        content = (p.get("clean_text") or "").strip()
+        content = (p.get("raw_text") or "").strip()   # ← raw_text của L1
         if not content:
             continue
 
@@ -298,7 +216,7 @@ async def get_parent_sources(top_chunks: list, expanded: list,
         result.append({
             "parent_id":   pid,
             "title":       title,
-            "clean_text":  content,
+            "raw_text":    content,            # ← dùng raw_text, không phải clean_text
             "seq_no":      p.get("seq_no", ""),
             "source_file": group["source_file"] or p.get("source_file", ""),
             "sources":     sorted(group["sources"]),
@@ -306,24 +224,25 @@ async def get_parent_sources(top_chunks: list, expanded: list,
             "matched_l2":  unique_l2,
         })
 
-    return result
+    return l2_rows, result
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# BƯỚC 6: Generate Answer
+# BƯỚC 5: Generate Answer — dùng L1 raw_text full, không trim
 # ─────────────────────────────────────────────────────────────────────────────
 async def generate_answer(query: str, context_chunks: list,
                            llm: AsyncLLMClient) -> str:
+    """
+    Đưa toàn bộ raw_text của L1 vào context LLM, không cắt bớt.
+    LLM đọc đúng văn bản gốc → hiểu ngữ cảnh chính xác nhất.
+    """
     context_parts = []
     for i, chunk in enumerate(context_chunks, 1):
         title       = chunk.get("title")       or f"Đoạn {i}"
-        parent      = chunk.get("parent_title") or ""
-        source_file = chunk.get("source_file")  or ""
-        text        = chunk.get("clean_text", "").strip()
+        source_file = chunk.get("source_file") or ""
+        text        = chunk.get("raw_text", "").strip()   # ← raw_text full, không trim
 
         meta_line = f"[{i}] {title}"
-        if parent:
-            meta_line += f" | Phần: {parent}"
         if source_file:
             meta_line += f" | File: {source_file}"
 
@@ -337,8 +256,6 @@ async def generate_answer(query: str, context_chunks: list,
 
 
 def _extract_numeric_tokens(text: str) -> list[str]:
-    # So sanh theo "so moc" de canh citation:
-    # 16.149, 4.069, 24,6%, 127.905...
     return re.findall(r"\d[\d\.\,]*%?", text or "")
 
 
@@ -346,7 +263,7 @@ def _repair_citations(answer: str, context_chunks: list) -> str:
     if not answer or not context_chunks:
         return answer
 
-    ctx_texts = [(c.get("clean_text") or "") for c in context_chunks]
+    ctx_texts = [(c.get("raw_text") or "") for c in context_chunks]
     lines = answer.splitlines()
     fixed_lines = []
 
@@ -395,7 +312,7 @@ def _print_db_results(name: str, items: list):
 def _print_sources(parent_sources: list):
     n = len(parent_sources)
     print(f"\n{'─'*60}")
-    print(f"  📚 NGUỒN DỮ LIỆU ({n} chương):")
+    print(f"  📚 NGUỒN DỮ LIỆU ({n} chương L1):")
     print(f"{'─'*60}")
 
     for i, s in enumerate(parent_sources, 1):
@@ -404,7 +321,7 @@ def _print_sources(parent_sources: list):
         dbs         = " + ".join(s.get("sources", []))
         rrf         = s.get("best_rrf", 0)
         matched     = s.get("matched_l2", [])
-        text        = s.get("clean_text", "").strip()
+        text        = s.get("raw_text", "").strip()
 
         print(f"\n  [{i}] {title}")
         if source_file:
@@ -413,13 +330,13 @@ def _print_sources(parent_sources: list):
             print(f"       🗄  Tìm qua  : {dbs}  (rrf={rrf:.5f})")
         if matched:
             display = "  |  ".join(f'"{m["title"][:50]}"' for m in matched[:4])
-            print(f"       📌 Đoạn khớp: {display}")
+            print(f"       📌 L2 khớp  : {display}")
 
         preview_lines = [ln.strip() for ln in text.split('\n') if ln.strip()][:2]
         preview = "  /  ".join(preview_lines)[:180]
         if len(text) > 200:
             preview += "..."
-        print(f"       📖 Nội dung : \"{preview}\"")
+        print(f"       📖 raw_text : \"{preview}\"")
 
     print(f"\n{'='*60}\n")
 
@@ -447,6 +364,7 @@ async def search(query: str, verbose: bool = True) -> dict:
             print(f"  🔍 Query: {query}")
             print(f"{'='*60}")
 
+        # ── Bước 1: Query Rewrite ──────────────────────────────────────────
         if verbose:
             print("\n[1/5] Query rewrite...")
         variants = await rewrite_query(query, llm)
@@ -455,6 +373,7 @@ async def search(query: str, verbose: bool = True) -> dict:
             print(f"  technical : {variants['technical']}")
             print(f"  keywords  : {variants['keywords']}")
 
+        # ── Bước 2: Parallel Search ────────────────────────────────────────
         if verbose:
             print("\n[2/5] Search song song (Qdrant + ES + Neo4j)...")
         qdrant_res, es_res, neo4j_res = await asyncio.gather(
@@ -468,11 +387,12 @@ async def search(query: str, verbose: bool = True) -> dict:
             _print_db_results("Elasticsearch", es_res)
             _print_db_results("Neo4j", neo4j_res)
 
+        # ── Bước 3: RRF Merge ──────────────────────────────────────────────
         if verbose:
             print("\n[3/5] RRF merge...")
         top_chunks = rrf_merge([qdrant_res, es_res, neo4j_res])
         if verbose:
-            print(f"  Top {len(top_chunks)} chunks sau RRF:")
+            print(f"  Top {len(top_chunks)} L2 chunks sau RRF:")
             for i, c in enumerate(top_chunks, 1):
                 srcs = "+".join(c["sources"])
                 print(
@@ -480,56 +400,42 @@ async def search(query: str, verbose: bool = True) -> dict:
                     f"chunk_id={c['chunk_id']}  {c['title'][:50]!r}"
                 )
 
+        # ── Bước 4: Resolve L1 ─────────────────────────────────────────────
         if verbose:
-            print("\n[4/5] Context expand + generate...")
-        expanded = await expand_context(top_chunks, meta_db)
-        expanded_map = {c.get("chunk_id"): c for c in expanded}
+            print("\n[4/5] Resolve L1 từ parent_id...")
+        l2_meta, parent_sources = await resolve_l1_context(top_chunks, meta_db)
+
         if verbose:
-            print("  Map RRF chunk -> parent_id:")
+            print("  Map L2 chunk_id → parent_id (L1):")
+            l2_map = {r["chunk_id"]: r for r in l2_meta}
             for i, c in enumerate(top_chunks, 1):
-                info = expanded_map.get(c.get("chunk_id"), {})
-                pid = info.get("parent_id", "")
-                print(
-                    f"  {i}. chunk_id={c.get('chunk_id')}  "
-                    f"parent_id={pid or 'N/A'}"
-                )
+                info = l2_map.get(c.get("chunk_id"), {})
+                pid  = info.get("parent_id", "")
+                print(f"  {i}. L2={c.get('chunk_id')}  →  L1={pid or 'N/A'}")
 
-        # L2 chi de tim: chon nhung L2 khop nhat voi query roi moi map len L1
-        ranked_l2 = sorted(expanded, key=lambda c: _score_l2_for_query(query, c), reverse=True)
-        distinct_parent_ids = [pid for pid in {
-            c.get("parent_id") for c in expanded if c.get("parent_id")
-        }]
-        dynamic_parent_k = len(distinct_parent_ids) if distinct_parent_ids else FINAL_TOP_K
-        selected_parent_ids = []
-        for c in ranked_l2[:dynamic_parent_k]:
-            pid = c.get("parent_id")
-            if pid and pid not in selected_parent_ids:
-                selected_parent_ids.append(pid)
-        top_l2_ids = {x.get("chunk_id") for x in ranked_l2[: max(dynamic_parent_k * 2, 4)]}
-        focused_top_chunks = [c for c in top_chunks if c.get("chunk_id") in top_l2_ids]
-        parent_sources = await get_parent_sources(focused_top_chunks, expanded, meta_db)
-        if parent_sources:
-            ranked_parents = sorted(
-                parent_sources,
-                key=lambda e: _score_parent_for_query(query, e),
-                reverse=True,
-            )
-            llm_context = ranked_parents[:dynamic_parent_k]
-            parent_sources = ranked_parents
-        else:
-            llm_context = expanded
+        # Rank L1 theo query, lấy top FINAL_TOP_K
+        ranked_parents = sorted(
+            parent_sources,
+            key=lambda e: _score_parent_for_query(query, e),
+            reverse=True,
+        )
+        llm_context    = ranked_parents[:FINAL_TOP_K]
+        parent_sources = ranked_parents   # full list dùng cho hiển thị
 
         if verbose:
-            print("\n[debug] LLM context (truoc generate):")
-            print(f"  So luong context: {len(llm_context)}")
+            print(f"\n[debug] LLM context — {len(llm_context)} L1 chunks (raw_text full):")
             for i, ctx in enumerate(llm_context, 1):
-                t = (ctx.get("title") or "").strip()
-                sf = (ctx.get("source_file") or "").strip()
-                txt = (ctx.get("clean_text") or "").strip().replace("\n", " ")
+                t   = (ctx.get("title") or "").strip()
+                sf  = (ctx.get("source_file") or "").strip()
+                txt = (ctx.get("raw_text") or "").strip().replace("\n", " ")
                 print(f"  [{i}] {t[:120]!r} | file={sf}")
                 print(f"      preview: {txt[:280]}")
-        answer         = await generate_answer(query, llm_context, llm)
-        answer         = _repair_citations(answer, llm_context)
+
+        # ── Bước 5: Generate ───────────────────────────────────────────────
+        if verbose:
+            print("\n[5/5] Generate answer...")
+        answer     = await generate_answer(query, llm_context, llm)
+        answer     = _repair_citations(answer, llm_context)
 
         latency_ms = int((time.time() - t0) * 1000)
 
@@ -555,7 +461,7 @@ async def search(query: str, verbose: bool = True) -> dict:
         return {
             "answer":         answer,
             "query_variants": variants,
-            "top_chunks":     expanded,
+            "top_chunks":     top_chunks,
             "parent_sources": parent_sources,
             "latency_ms":     latency_ms,
         }
@@ -563,4 +469,3 @@ async def search(query: str, verbose: bool = True) -> dict:
     finally:
         await meta_db.close()
         graph_db.close()
-

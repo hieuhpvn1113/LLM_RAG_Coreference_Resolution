@@ -3,9 +3,16 @@
 Chiến lược 2 cấp:
 
   Level 1 (Section)
-    • 1 chunk cha = 1 chương hoàn chỉnh
-    • Flush CHỈ tại heading chính (Roman I./II./III. hoặc CHƯƠNG/PHẦN)
+    • 1 chunk cha = 1 phần/mục hoàn chỉnh theo cấu trúc tài liệu
+    • Flush tại heading L1 theo thứ tự ưu tiên:
+        1. Page-header (vd: "2 CTCP SỮA VIỆT NAM...")  ← loại bỏ, không giữ lại
+        2. ALL-CAPS title  (vd: "TÓM TẮT KẾT QUẢ KINH DOANH...")
+        3. Roman numeral / CHƯƠNG / PHẦN / MỤC
+        4. Metric-heading  (vd: "Biên lợi nhuận: ...")
+    • Không flush tại: i./ii./iii., a)/b), sub-heading thứ cấp
     • Không giới hạn token — mục 1, 2, 3… luôn thuộc cùng cha
+    • Merge chunk L1 quá nhỏ (<80 token, không phải major heading)
+      vào chunk trước để tránh L1 lùn
 
   Level 2 (Paragraph)  ← CÓ COREF PRE-PROCESSING
     • Trước semantic split: resolve_coref(L1.clean_text) → coref_text
@@ -77,12 +84,6 @@ def _split_sentences(text: str) -> list[str]:
 # Sentence-boundary chunker
 # ---------------------------------------------------------------------------
 def _split_at_sentence_boundary(sentences: list[str], max_tokens: int) -> list[str]:
-    """
-    Gom câu vào chunk theo nguyên tắc:
-      • Thêm câu vào chunk hiện tại
-      • Khi tổng token ≥ max_tokens VÀ vừa kết thúc câu → flush, bắt đầu chunk mới
-      • Câu đơn dài hơn max_tokens → vẫn giữ nguyên 1 chunk (không cắt giữa câu)
-    """
     if not sentences:
         return []
     chunks: list[str] = []
@@ -106,11 +107,6 @@ def _split_sentences_paired(
     coref_sents: list[str],
     max_tokens: int,
 ) -> list[tuple[str, str]]:
-    """
-    Giống _split_at_sentence_boundary nhưng xử lý song song 2 danh sách câu
-    (orig và coref) với cùng 1 bộ điểm flush.
-    Trả về list[(orig_chunk, coref_chunk)].
-    """
     if not orig_sents:
         return []
     pairs: list[tuple[str, str]] = []
@@ -119,7 +115,6 @@ def _split_sentences_paired(
     cur_tok = 0
 
     for o_sent, c_sent in zip(orig_sents, coref_sents):
-        # Token count từ coref (đã expand) để quyết định flush
         sent_tok = count_tokens(c_sent)
         cur_orig.append(o_sent)
         cur_coref.append(c_sent)
@@ -150,6 +145,14 @@ def _cosine_distance(v1: list, v2: list) -> float:
 # ---------------------------------------------------------------------------
 # Heading detectors
 # ---------------------------------------------------------------------------
+
+# Page header dạng: "2 CTCP SỮA VIỆT NAM (VNM) - BẢN TIN NHÀ ĐẦU TƯ QUÝ 1 NĂM 2026"
+_PAGE_HEADER_RE = re.compile(
+    r'^\s*\d+\s+CTCP\s+S[ỮƯ]A\s+VI[ỆE]T\s+NAM.*B[ẢA]N\s+TIN\s+NH[ÀA]\s+Đ[ẦA]U\s+T[ƯU].*$',
+    re.IGNORECASE,
+)
+
+# Roman numeral / CHƯƠNG / PHẦN / MỤC (major structural headings)
 _MAJOR_SECTION_RE = re.compile(
     r'^\s*(?:'
     r'(?:I{1,3}|IV|VI{0,3}|IX|X{1,2}(?:I{0,3}|IV|VI{0,3}|IX)?|XI{0,3})\.\s+\S.{0,250}'
@@ -158,19 +161,25 @@ _MAJOR_SECTION_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Sub-heading: i./ii./iii. hoặc a)/b)/c) — KHÔNG phải L1 boundary
 _SUB_HEADING_RE = re.compile(
-    r'^\s*(?:\d+\.|[a-zđ]\))\s+\S.{0,200}\s*$',
+    r'^\s*(?:[ivxlcdmIVXLCDM]{1,4}\.|[a-zđA-ZĐ]\))\s+\S.{0,200}\s*$',
+)
+
+# Metric heading dạng "Biên lợi nhuận: ..."
+_METRIC_HEADING_RE = re.compile(
+    r'^\s*(?:'
+    r'bi[eê]n l[ợo]i nhu[ậa]n'
+    r'|doanh thu'
+    r'|chi ph[ií] ho[ạa]t đ[ộo]ng'
+    r'|l[ợo]i nhu[ậa]n(?:\s+sau thu[ếe])?'
+    r'|t[iì]nh h[iì]nh t[aà]i ch[ií]nh'
+    r'|k[eế]t qu[aả] ho[aạ]t đ[oộ]ng'
+    r')\s*:\s*\S.*$',
     re.IGNORECASE,
 )
 
-def _is_major_section_heading(line: str) -> bool:
-    line = line.strip()
-    return bool(line) and len(line) <= 350 and bool(_MAJOR_SECTION_RE.match(line))
-
-def _is_sub_heading(line: str) -> bool:
-    line = line.strip()
-    return bool(line) and bool(_SUB_HEADING_RE.match(line))
-
+# Minor heading cho normalize_to_blocks (L2 level)
 _MINOR_HEADING_RE = re.compile(
     r'^\s*(?:'
     r'#{1,2}\s+.+'
@@ -180,21 +189,85 @@ _MINOR_HEADING_RE = re.compile(
     re.IGNORECASE,
 )
 
+
+def _is_page_header(line: str) -> bool:
+    """Nhận diện header trang lặp lại (vd: '2 CTCP SỮA VIỆT NAM...')."""
+    return bool(_PAGE_HEADER_RE.match(line.strip()))
+
+
 def _is_all_caps_title(text: str) -> bool:
+    """
+    Nhận diện tiêu đề ALL-CAPS:
+    - Tối thiểu 3 từ, tối đa 180 ký tự
+    - ≥ 85% chữ cái là uppercase
+    - Không phải page-header
+    - Có thể kết thúc bằng dấu ':' (vd: "TÓM TẮT KẾT QUẢ KINH DOANH:")
+    """
     stripped = text.strip()
-    if len(stripped.split()) < 4:
+    # Loại page-header
+    if _is_page_header(stripped):
+        return False
+    if len(stripped) > 180 or len(stripped.split()) < 3:
         return False
     letters = [ch for ch in stripped if ch.isalpha()]
-    if len(letters) < 10:
+    if len(letters) < 8:
         return False
     upper_letters = [ch for ch in letters if ch.isupper()]
-    return len(upper_letters) / len(letters) >= 0.85 and len(stripped) <= 120
+    return len(upper_letters) / len(letters) >= 0.85
+
+
+def _is_major_section_heading(line: str) -> bool:
+    line = line.strip()
+    return bool(line) and len(line) <= 350 and bool(_MAJOR_SECTION_RE.match(line))
+
+
+def _is_sub_heading(line: str) -> bool:
+    """Sub-heading dạng i./ii. hoặc a)/b) — KHÔNG flush L1."""
+    line = line.strip()
+    return bool(line) and bool(_SUB_HEADING_RE.match(line))
+
 
 def _is_section_heading(line: str) -> bool:
+    """Dùng nội bộ trong _normalize_to_blocks (L2 level)."""
     line = line.strip()
     if not line or len(line) > 300:
         return False
-    return bool(_MINOR_HEADING_RE.match(line)) or _is_all_caps_title(line)
+    return (
+        bool(_MINOR_HEADING_RE.match(line))
+        or bool(_METRIC_HEADING_RE.match(line))
+        or _is_all_caps_title(line)
+    )
+
+
+def _is_l1_boundary_heading(line: str) -> bool:
+    """
+    Xác định ranh giới flush L1.
+
+    Thứ tự ưu tiên (từ cao đến thấp):
+      1. Page-header  → True  (sẽ bị lọc khỏi nội dung sau)
+      2. ALL-CAPS title (≥3 từ, ≥85% uppercase, ≤180 ký tự)
+      3. Roman numeral / CHƯƠNG / PHẦN / MỤC heading
+      4. Metric-heading dạng "Tên mục: nội dung"
+
+    KHÔNG flush tại:
+      - Sub-heading kiểu i./ii./iii. hoặc a)/b)
+      - Dòng thường có chữ thường xen lẫn
+    """
+    ls = (line or "").strip()
+    if not ls:
+        return False
+
+    # Sub-heading → KHÔNG flush L1
+    if _is_sub_heading(ls):
+        return False
+
+    return (
+        _is_page_header(ls)
+        or _is_all_caps_title(ls)
+        or _is_major_section_heading(ls)
+        or bool(_METRIC_HEADING_RE.match(ls))
+    )
+
 
 def _normalize_to_blocks(text: str) -> list[str]:
     raw_paragraphs = re.split(r'\n\n+', text)
@@ -226,14 +299,20 @@ def _normalize_to_blocks(text: str) -> list[str]:
 
 # ---------------------------------------------------------------------------
 # STEP 1: Hierarchical Split → Level 1
-# (không thay đổi — coref chỉ áp dụng ở Step 2)
 # ---------------------------------------------------------------------------
 def hierarchical_split(text: str, doc_id: str, source_file: str) -> list:
     """
-    1 chương = 1 chunk cha.
-    Flush CHỈ tại heading chính Roman numeral / CHƯƠNG / PHẦN.
+    Tách văn bản thành L1 chunks theo cấu trúc tài liệu.
+
+    Thứ tự ưu tiên flush (từ cao đến thấp):
+      1. ALL-CAPS title  (ưu tiên cao nhất — phổ biến trong báo cáo VN)
+      2. Roman / CHƯƠNG / PHẦN
+      3. Metric-heading
+      4. Page-header     (bị bỏ qua, không đưa vào nội dung)
+
+    Sub-heading i./ii./iii. KHÔNG tạo L1 mới.
     Không giới hạn token ở L1.
-    raw_text = văn gốc, clean_text = clean_text(raw_text) — chưa có coref.
+    Merge L1 quá nhỏ (<80 token, không phải major/all-caps heading) vào chunk trước.
     """
     text = clean_text(text)
     blocks = _normalize_to_blocks(text)
@@ -244,19 +323,34 @@ def hierarchical_split(text: str, doc_id: str, source_file: str) -> list:
     current_parts: list[str] = []
 
     for block in blocks:
-        if _is_major_section_heading(block) and current_parts:
+        ls = block.strip()
+
+        # Bỏ qua page-header hoàn toàn (không đưa vào nội dung)
+        if _is_page_header(ls):
+            continue
+
+        if _is_l1_boundary_heading(ls) and current_parts:
             sections_raw.append('\n\n'.join(current_parts))
             current_parts = []
+
         current_parts.append(block)
 
     if current_parts:
         sections_raw.append('\n\n'.join(current_parts))
 
+    # Merge L1 lùn (<80 token) vào chunk trước
+    # NHƯNG giữ nguyên nếu dòng đầu là ALL-CAPS title hoặc major heading
     merged: list[str] = []
     for s in sections_raw:
         s = s.strip()
+        if not s:
+            continue
         first_line = s.split('\n')[0].strip()
-        if merged and count_tokens(s) < 80 and not _is_major_section_heading(first_line):
+        is_strong_boundary = (
+            _is_all_caps_title(first_line)
+            or _is_major_section_heading(first_line)
+        )
+        if merged and count_tokens(s) < 80 and not is_strong_boundary:
             merged[-1] = merged[-1] + '\n\n' + s
         else:
             merged.append(s)
@@ -271,6 +365,11 @@ def hierarchical_split(text: str, doc_id: str, source_file: str) -> list:
         char_start = pos if pos != -1 else char_cursor
         char_end   = char_start + len(section_text)
         char_cursor = char_end
+
+        first_line = section_text.split('\n')[0].strip()
+        print(f"[chunker] L1[{idx}] heading='{first_line[:60]}' "
+              f"tokens={count_tokens(cleaned)}")
+
         chunks.append({
             'chunk_id':    str(uuid.uuid4()),
             'doc_id':      doc_id,
@@ -279,8 +378,8 @@ def hierarchical_split(text: str, doc_id: str, source_file: str) -> list:
             'prev_id':     None,
             'next_id':     None,
             'seq_no':      str(idx),
-            'raw_text':    section_text,   # ← văn gốc, KHÔNG thay đổi
-            'clean_text':  cleaned,        # ← clean_text thuần (chưa coref)
+            'raw_text':    section_text,
+            'clean_text':  cleaned,
             'token_count': count_tokens(cleaned),
             'source_file': source_file,
             'char_start':  char_start,
@@ -320,7 +419,6 @@ def hierarchical_split(text: str, doc_id: str, source_file: str) -> list:
 def _find_semantic_cut_indices(sentences: list[str]) -> set[int]:
     """
     Embed sentences → tính cosine distance → adaptive threshold → trả về set cut indices.
-    Tách riêng để semantic_split() có thể dùng lại với coref_sentences.
 
     WIN=3: so sánh trung bình 3 câu trái vs 3 câu phải.
     Adaptive threshold = mean + 0.5*std của tất cả distances trong section.
@@ -365,11 +463,6 @@ def _apply_cut_indices_paired(
     coref_sents: list[str],
     cut_indices: set[int],
 ) -> list[tuple[list[str], list[str]]]:
-    """
-    Áp dụng cut_indices lên cả orig_sents và coref_sents (cùng vị trí).
-    Trả về list[(orig_group, coref_group)].
-    Merge nhóm quá ngắn (< 80 token theo coref) vào nhóm trước.
-    """
     groups_orig:  list[list[str]] = []
     groups_coref: list[list[str]] = []
     start = 0
@@ -386,7 +479,6 @@ def _apply_cut_indices_paired(
     if not groups_orig:
         return [(orig_sents, coref_sents)]
 
-    # Merge nhóm quá ngắn vào trước (dùng coref để đo token)
     merged_o: list[list[str]] = []
     merged_c: list[list[str]] = []
     for go, gc in zip(groups_orig, groups_coref):
@@ -402,8 +494,7 @@ def _apply_cut_indices_paired(
 
 
 # ---------------------------------------------------------------------------
-# STEP 2b: _semantic_units — wrapper giữ backward compat
-# (dùng nội bộ khi không cần coref pairing)
+# STEP 2b: _semantic_units — wrapper nội bộ
 # ---------------------------------------------------------------------------
 def _semantic_units(text: str) -> list[str]:
     sentences = _split_sentences(text)
@@ -419,30 +510,25 @@ def _semantic_units(text: str) -> list[str]:
 # ---------------------------------------------------------------------------
 def semantic_split(section: dict, doc_id: str) -> list:
     """
-    Chia L1 section thành L2 chunks với Coref Pre-processing:
+    Chia L1 section thành L2 chunks với Coref Pre-processing.
 
       1. Lấy L1 clean_text (văn gốc đã clean, chưa coref)
       2. resolve_coref(clean_text) → coref_text
-         • raw_text của L1 KHÔNG bị đụng tới
-      3. Split cả hai thành sentences (1:1 mapping):
-         orig_sents  ← từ clean_text gốc
-         coref_sents ← từ coref_text
-         Nếu số câu khác nhau (coref tạo thêm câu) → fallback coref_sents = orig_sents
+      3. Split cả hai thành sentences (1:1 mapping)
+         Nếu số câu khác nhau → fallback coref_sents = orig_sents
       4. Dùng coref_sents để embed + tìm cut_indices
-         → điểm cắt ngữ nghĩa chuẩn hơn vì tham chiếu đã được làm rõ
-      5. Áp dụng cut_indices lên cả orig_sents và coref_sents
-         → L2 raw_text  = orig segment  (văn gốc, không sửa)
-         → L2 clean_text = coref segment (đã resolve, đưa vào embedding)
-      6. Sub-split nếu unit vượt CHUNK_SIZE_PARAGRAPH (theo ranh giới câu)
+      5. Áp dụng cut_indices lên cả orig và coref
+         → L2 raw_text  = orig segment  (văn gốc)
+         → L2 clean_text = coref segment (đã resolve)
+      6. Sub-split nếu unit vượt CHUNK_SIZE_PARAGRAPH
     """
-    orig_text   = section['clean_text']   # ← văn gốc L1 (không đổi)
+    orig_text   = section['clean_text']
     parent_id   = section['chunk_id']
     source_file = section.get('source_file', '')
     parent_seq  = str(section['seq_no'])
 
-    # ── Section ngắn → 1 chunk L2 (không cần semantic split) ────────────────
+    # Section ngắn → 1 chunk L2
     if count_tokens(orig_text) <= CHUNK_SIZE_PARAGRAPH:
-        # Vẫn áp dụng coref để clean_text của L2 được resolve
         from core.coref_resolver import resolve_coref
         coref_text = resolve_coref(orig_text)
         return [{
@@ -453,34 +539,28 @@ def semantic_split(section: dict, doc_id: str) -> list:
             'prev_id':     None,
             'next_id':     None,
             'seq_no':      f"{parent_seq}.{0:04d}",
-            'raw_text':    orig_text,    # ← gốc
-            'clean_text':  coref_text,   # ← coref-resolved
+            'raw_text':    orig_text,
+            'clean_text':  coref_text,
             'token_count': count_tokens(coref_text),
             'source_file': source_file,
         }]
 
     print(f"[chunker] Semantic split section {parent_seq} ({count_tokens(orig_text)} tokens)")
 
-    # ── Coref Pre-processing ─────────────────────────────────────────────────
     from core.coref_resolver import resolve_coref
     coref_text = resolve_coref(orig_text)
 
     orig_sents  = _split_sentences(orig_text)
     coref_sents = _split_sentences(coref_text)
 
-    # Safety: coref có thể thêm/xóa câu trong một số edge case
     if len(orig_sents) != len(coref_sents):
         print(f"[chunker] ⚠️  Coref changed sentence count "
               f"({len(orig_sents)} → {len(coref_sents)}), using orig for pairing")
-        coref_sents = orig_sents  # fallback: vẫn dùng orig để embed
+        coref_sents = orig_sents
 
-    # ── Tìm cut indices từ coref sentences ──────────────────────────────────
     cut_indices = _find_semantic_cut_indices(coref_sents)
-
-    # ── Áp dụng cùng cut_indices cho cả orig và coref ───────────────────────
     paired_groups = _apply_cut_indices_paired(orig_sents, coref_sents, cut_indices)
 
-    # ── Build final_pairs: (orig_text, coref_text) mỗi L2 chunk ─────────────
     final_pairs: list[tuple[str, str]] = []
 
     for orig_group, coref_group in paired_groups:
@@ -490,15 +570,12 @@ def semantic_split(section: dict, doc_id: str) -> list:
         if not orig_unit:
             continue
 
-        # Sub-split nếu vượt limit (dùng coref token count để quyết định)
         if count_tokens(coref_unit) <= CHUNK_SIZE_PARAGRAPH:
             final_pairs.append((orig_unit, coref_unit))
         else:
-            # Cắt theo ranh giới câu — cùng điểm flush cho cả orig và coref
             sub_pairs = _split_sentences_paired(orig_group, coref_group, CHUNK_SIZE_PARAGRAPH)
             final_pairs.extend(sub_pairs)
 
-    # ── Đóng gói thành chunk dict ────────────────────────────────────────────
     chunks = []
     for orig_chunk, coref_chunk in final_pairs:
         orig_chunk  = orig_chunk.strip()
@@ -513,8 +590,8 @@ def semantic_split(section: dict, doc_id: str) -> list:
             'prev_id':     None,
             'next_id':     None,
             'seq_no':      f"{parent_seq}.{len(chunks):04d}",
-            'raw_text':    orig_chunk,    # ← văn gốc (không sửa)
-            'clean_text':  coref_chunk,   # ← coref-resolved (cho embedding)
+            'raw_text':    orig_chunk,
+            'clean_text':  coref_chunk,
             'token_count': count_tokens(coref_chunk),
             'source_file': source_file,
         })
