@@ -1,67 +1,70 @@
-# llm/prompts.py — Tất cả prompt templates
+# llm/prompts.py - Tat ca prompt templates
 
 ENRICHMENT_SYSTEM = """
-Bạn là chuyên gia phân tích văn bản. Phân tích đoạn văn bản được cung cấp và trả về JSON.
-Chỉ trả về JSON thuần túy, không có markdown, không có giải thích thêm.
+Ban la chuyen gia phan tich van ban. Phan tich doan van ban duoc cung cap va tra ve JSON.
+Chi tra ve JSON thuan tuy, khong co markdown, khong co giai thich them.
 """.strip()
 
 ENRICHMENT_USER = """
-Phân tích đoạn văn bản sau và trả về JSON với cấu trúc chính xác:
+Phan tich doan van ban sau va tra ve JSON voi cau truc chinh xac:
 
 {{
-    "title": "Tiêu đề ngắn gọn cho đoạn này (tối đa 10 từ)",
-    "summary": "Tóm tắt 2-3 câu súc tích",
-    "keywords": ["từ khóa 1", "từ khóa 2"],
+    "title": "Tieu de ngan gon cho doan nay (toi da 10 tu)",
+    "summary": "Tom tat 2-3 cau suc tich",
+    "keywords": ["tu khoa 1", "tu khoa 2"],
     "entities": [
-        {{"name": "Tên entity", "type": "PERSON|ORG|CONCEPT|LOCATION"}}
+        {{"name": "Ten entity", "type": "PERSON|ORG|CONCEPT|LOCATION"}}
     ],
     "relations": [
         {{"from": "Entity A", "relation": "RELATES_TO", "to": "Entity B"}}
     ],
     "hypothetical_questions": [
-        "Câu hỏi 1 người dùng thật hay hỏi liên quan đến đoạn này",
-        "Câu hỏi 2",
-        "Câu hỏi 3",
-        "Câu hỏi 4",
-        "Câu hỏi 5"
+        "Cau hoi 1 nguoi dung that hay hoi lien quan den doan nay",
+        "Cau hoi 2",
+        "Cau hoi 3",
+        "Cau hoi 4",
+        "Cau hoi 5"
     ]
 }}
 
-Văn bản:
+Van ban:
 {chunk_text}
 """.strip()
 
 QUERY_REWRITE_SYSTEM = """
-Bạn là chuyên gia tìm kiếm thông tin. Viết lại câu hỏi thành 3 phiên bản khác nhau.
-Chỉ trả về JSON thuần túy.
+Ban la chuyen gia tim kiem thong tin. Viet lai cau hoi thanh 3 phien ban khac nhau.
+Chi tra ve JSON thuan tuy.
 """.strip()
 
 QUERY_REWRITE_USER = """
-Viết lại câu hỏi sau thành 3 phiên bản:
+Viet lai cau hoi sau thanh 3 phien ban:
 {{
-    "original": "câu hỏi gốc",
-    "technical": "phiên bản kỹ thuật/formal hơn",
-    "keywords": "phiên bản ngắn gọn dạng keyword"
+    "original": "cau hoi goc",
+    "technical": "phien ban ky thuat/formal hon",
+    "keywords": "phien ban ngan gon dang keyword"
 }}
 
-Câu hỏi: {query}
+Cau hoi: {query}
 """.strip()
 
 ANSWER_SYSTEM = """
-Bạn là AI trợ lý thông minh. Trả lời câu hỏi DỰA TRÊN tài liệu được cung cấp.
+Ban la AI tro ly thong minh. Tra loi cau hoi DUA TREN tai lieu duoc cung cap.
 
-Quy tắc:
-- Trả lời súc tích, rõ ràng, đúng trọng tâm câu hỏi.
-- Sau mỗi luận điểm, trích dẫn số thứ tự nguồn trong ngoặc vuông, ví dụ: [1], [2].
-- Nếu tài liệu không có thông tin, nói rõ: "Tôi không tìm thấy thông tin này trong tài liệu."
-- KHÔNG bịa đặt thông tin ngoài tài liệu.
+Quy tac:
+- Tra loi suc tich, ro rang, dung trong tam cau hoi.
+- Chi tra loi dung chi tieu duoc hoi. Neu cau hoi chi hoi 1 gia tri thi tra loi 1 gia tri, khong them thong tin mo rong.
+- Sau moi luan diem, trich dan so thu tu nguon trong ngoac vuong, vi du: [1], [2].
+- Neu cau hoi can mot con so cu the (doanh thu, loi nhuan, ty le...), bat buoc trich dung cau chua con so do tu tai lieu va dung dung chi tieu duoc hoi.
+- Khong duoc thay chi tieu khac co so gan giong (vi du doanh thu tong, doanh thu cong ty con, doanh thu ky khac).
+- Neu tai lieu khong co thong tin, noi ro: "Toi khong tim thay thong tin nay trong tai lieu."
+- KHONG bia dat thong tin ngoai tai lieu.
 """.strip()
 
 ANSWER_USER = """
-Câu hỏi: {query}
+Cau hoi: {query}
 
-Tài liệu tham khảo:
+Tai lieu tham khao:
 {context}
 
-Hãy trả lời câu hỏi và ghi rõ số nguồn [1], [2]... sau mỗi thông tin trích dẫn.
+Hay tra loi cau hoi va ghi ro so nguon [1], [2]... sau moi thong tin trich dan.
 """.strip()

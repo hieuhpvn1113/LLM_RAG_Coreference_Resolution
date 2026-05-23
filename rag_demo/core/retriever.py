@@ -14,6 +14,7 @@ import asyncio
 import json
 import re
 import time
+import unicodedata
 
 from db.meta_db    import MetaDB
 from db.vector_db  import VectorDB
@@ -23,9 +24,85 @@ from core.embedder import embed_query
 from llm.client    import AsyncLLMClient
 from llm.prompts   import (QUERY_REWRITE_SYSTEM, QUERY_REWRITE_USER,
                             ANSWER_SYSTEM, ANSWER_USER)
-from config        import SEARCH_TOP_K, FINAL_TOP_K, RRF_K, SOURCE_MIN_RRF
+from config        import SEARCH_TOP_K, RRF_TOP_K, FINAL_TOP_K, RRF_K, SOURCE_MIN_RRF
 
 SOURCE_DISPLAY_MIN_RRF = max(SOURCE_MIN_RRF, 0.02)
+
+
+def _normalize_text(text: str) -> str:
+    text = unicodedata.normalize("NFKD", (text or "")).encode("ascii", "ignore").decode("ascii")
+    text = text.lower()
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _score_parent_for_query(query: str, entry: dict) -> float:
+    q = _normalize_text(query)
+    title = _normalize_text(entry.get("title", ""))
+    text = _normalize_text(entry.get("clean_text", ""))
+    matched_titles = " ".join(m.get("title", "") for m in entry.get("matched_l2", []))
+    matched_titles = _normalize_text(matched_titles)
+
+    strong_phrases = [
+        "doanh thu thuan hop nhat",
+        "q1 2026",
+        "vinamilk",
+    ]
+    score = 0.0
+    for phrase in strong_phrases:
+        if phrase in text:
+            score += 5.0
+        if phrase in title:
+            score += 3.0
+        if phrase in matched_titles:
+            score += 2.0
+
+    for token in set(q.split()):
+        if len(token) < 3:
+            continue
+        if token in text:
+            score += 0.15
+        if token in title:
+            score += 0.30
+        if token in matched_titles:
+            score += 0.20
+
+    score += float(entry.get("best_rrf", 0.0)) * 20.0
+    return score
+
+
+def _score_l2_for_query(query: str, chunk: dict) -> float:
+    q = _normalize_text(query)
+    title = _normalize_text(chunk.get("title", ""))
+    text = _normalize_text(chunk.get("clean_text", ""))
+    score = float(chunk.get("rrf_score", 0.0)) * 10.0
+
+    strong_phrases = [
+        "eps",
+        "thu nhap moi co phieu",
+        "bao cao tai chinh",
+        "q1 2026",
+        "vinamilk",
+    ]
+    for phrase in strong_phrases:
+        if phrase in title:
+            score += 4.0
+        if phrase in text:
+            score += 3.0
+
+    for token in set(q.split()):
+        if len(token) < 3:
+            continue
+        if token in title:
+            score += 0.30
+        if token in text:
+            score += 0.15
+        if token in {"eps", "loi", "nhuan", "doanh", "thu", "phieu"}:
+            if token in title:
+                score += 0.80
+            if token in text:
+                score += 0.60
+    return score
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -67,7 +144,7 @@ def search_neo4j(graph_db: GraphDB, query_text: str, top_k: int) -> list:
 # ─────────────────────────────────────────────────────────────────────────────
 # BƯỚC 3: RRF Merge
 # ─────────────────────────────────────────────────────────────────────────────
-def rrf_merge(results_per_db: list, k: int = RRF_K, top_n: int = FINAL_TOP_K) -> list:
+def rrf_merge(results_per_db: list, k: int = RRF_K, top_n: int = RRF_TOP_K) -> list:
     """
     Gộp kết quả từ nhiều DB bằng Reciprocal Rank Fusion.
     Chỉ giữ chunk_id + title để display — full text fetch từ PostgreSQL sau.
@@ -229,13 +306,6 @@ async def get_parent_sources(top_chunks: list, expanded: list,
             "matched_l2":  unique_l2,
         })
 
-    def _seq_key(e):
-        try:
-            return int(e["seq_no"])
-        except (ValueError, TypeError):
-            return 9999
-
-    result.sort(key=_seq_key)
     return result
 
 
@@ -264,6 +334,59 @@ async def generate_answer(query: str, context_chunks: list,
         user=ANSWER_USER.format(query=query, context="\n\n---\n\n".join(context_parts)),
         max_tokens=1200,
     )
+
+
+def _extract_numeric_tokens(text: str) -> list[str]:
+    # So sanh theo "so moc" de canh citation:
+    # 16.149, 4.069, 24,6%, 127.905...
+    return re.findall(r"\d[\d\.\,]*%?", text or "")
+
+
+def _repair_citations(answer: str, context_chunks: list) -> str:
+    if not answer or not context_chunks:
+        return answer
+
+    ctx_texts = [(c.get("clean_text") or "") for c in context_chunks]
+    lines = answer.splitlines()
+    fixed_lines = []
+
+    for line in lines:
+        nums = _extract_numeric_tokens(line)
+        if not nums:
+            fixed_lines.append(line)
+            continue
+
+        hit_counter = {}
+        for n in nums:
+            for i, ctx in enumerate(ctx_texts, start=1):
+                if n and n in ctx:
+                    hit_counter[i] = hit_counter.get(i, 0) + 1
+
+        if not hit_counter:
+            fixed_lines.append(line)
+            continue
+
+        best_idx = max(hit_counter, key=hit_counter.get)
+        if re.search(r"\[\d+\]", line):
+            line = re.sub(r"\[\d+\]", f"[{best_idx}]", line)
+        else:
+            line = f"{line.rstrip()} [{best_idx}]"
+        fixed_lines.append(line)
+
+    return "\n".join(fixed_lines)
+
+
+def _print_db_results(name: str, items: list):
+    print(f"  {name} top {len(items)}:")
+    for i, item in enumerate(items, 1):
+        cid = item.get("chunk_id", "")
+        title = (item.get("title", "") or "")[:50]
+        score = item.get("score", 0.0)
+        try:
+            score_str = f"{float(score):.5f}"
+        except Exception:
+            score_str = str(score)
+        print(f"  {i}. score={score_str} chunk_id={cid}  {title!r}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -341,6 +464,9 @@ async def search(query: str, verbose: bool = True) -> dict:
         )
         if verbose:
             print(f"  Qdrant: {len(qdrant_res)}  ES: {len(es_res)}  Neo4j: {len(neo4j_res)}")
+            _print_db_results("Qdrant", qdrant_res)
+            _print_db_results("Elasticsearch", es_res)
+            _print_db_results("Neo4j", neo4j_res)
 
         if verbose:
             print("\n[3/5] RRF merge...")
@@ -349,14 +475,61 @@ async def search(query: str, verbose: bool = True) -> dict:
             print(f"  Top {len(top_chunks)} chunks sau RRF:")
             for i, c in enumerate(top_chunks, 1):
                 srcs = "+".join(c["sources"])
-                print(f"  {i}. rrf={c['rrf_score']:.5f} [{srcs}]  {c['title'][:50]!r}")
+                print(
+                    f"  {i}. rrf={c['rrf_score']:.5f} [{srcs}] "
+                    f"chunk_id={c['chunk_id']}  {c['title'][:50]!r}"
+                )
 
         if verbose:
             print("\n[4/5] Context expand + generate...")
-        expanded       = await expand_context(top_chunks, meta_db)
-        parent_sources = await get_parent_sources(top_chunks, expanded, meta_db)
-        llm_context    = parent_sources if parent_sources else expanded
+        expanded = await expand_context(top_chunks, meta_db)
+        expanded_map = {c.get("chunk_id"): c for c in expanded}
+        if verbose:
+            print("  Map RRF chunk -> parent_id:")
+            for i, c in enumerate(top_chunks, 1):
+                info = expanded_map.get(c.get("chunk_id"), {})
+                pid = info.get("parent_id", "")
+                print(
+                    f"  {i}. chunk_id={c.get('chunk_id')}  "
+                    f"parent_id={pid or 'N/A'}"
+                )
+
+        # L2 chi de tim: chon nhung L2 khop nhat voi query roi moi map len L1
+        ranked_l2 = sorted(expanded, key=lambda c: _score_l2_for_query(query, c), reverse=True)
+        distinct_parent_ids = [pid for pid in {
+            c.get("parent_id") for c in expanded if c.get("parent_id")
+        }]
+        dynamic_parent_k = len(distinct_parent_ids) if distinct_parent_ids else FINAL_TOP_K
+        selected_parent_ids = []
+        for c in ranked_l2[:dynamic_parent_k]:
+            pid = c.get("parent_id")
+            if pid and pid not in selected_parent_ids:
+                selected_parent_ids.append(pid)
+        top_l2_ids = {x.get("chunk_id") for x in ranked_l2[: max(dynamic_parent_k * 2, 4)]}
+        focused_top_chunks = [c for c in top_chunks if c.get("chunk_id") in top_l2_ids]
+        parent_sources = await get_parent_sources(focused_top_chunks, expanded, meta_db)
+        if parent_sources:
+            ranked_parents = sorted(
+                parent_sources,
+                key=lambda e: _score_parent_for_query(query, e),
+                reverse=True,
+            )
+            llm_context = ranked_parents[:dynamic_parent_k]
+            parent_sources = ranked_parents
+        else:
+            llm_context = expanded
+
+        if verbose:
+            print("\n[debug] LLM context (truoc generate):")
+            print(f"  So luong context: {len(llm_context)}")
+            for i, ctx in enumerate(llm_context, 1):
+                t = (ctx.get("title") or "").strip()
+                sf = (ctx.get("source_file") or "").strip()
+                txt = (ctx.get("clean_text") or "").strip().replace("\n", " ")
+                print(f"  [{i}] {t[:120]!r} | file={sf}")
+                print(f"      preview: {txt[:280]}")
         answer         = await generate_answer(query, llm_context, llm)
+        answer         = _repair_citations(answer, llm_context)
 
         latency_ms = int((time.time() - t0) * 1000)
 
@@ -390,3 +563,4 @@ async def search(query: str, verbose: bool = True) -> dict:
     finally:
         await meta_db.close()
         graph_db.close()
+

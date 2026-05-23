@@ -118,29 +118,37 @@ class KeywordDB:
         BM25 multi-field search — trả về chunk_id + score + title.
         Full text KHÔNG trả về ở đây — fetch từ PostgreSQL sau khi có chunk_id.
         """
-        must_clauses = [
-            {
-                "multi_match": {
-                    "query":  query,
-                    "fields": [
-                        "clean_text",
-                        "title^1.5",
-                        "summary",
-                        "keywords^1.5",
-                        "hypothetical_questions^2",
-                    ],
-                    "type":      "best_fields",
-                    "fuzziness": "AUTO",
-                }
+        must_clauses = [{
+            "multi_match": {
+                "query": query,
+                "fields": [
+                    "clean_text^4",
+                    "title^2",
+                    "summary^1.5",
+                    "keywords^1.5",
+                    "hypothetical_questions^2",
+                ],
+                "type": "best_fields",
+                "fuzziness": "AUTO",
             }
-        ]
+        }]
         filter_clauses = [{"term": {"level": 2}}]
         if doc_id:
             filter_clauses.append({"term": {"doc_id": doc_id}})
 
         body = {
-            "query": {"bool": {"must": must_clauses, "filter": filter_clauses}},
-            "size":  top_k,
+            "query": {
+                "bool": {
+                    "must": must_clauses,
+                    "filter": filter_clauses,
+                    "should": [
+                        {"match_phrase": {"clean_text": {"query": query, "boost": 6}}},
+                        {"match_phrase": {"title": {"query": query, "boost": 3}}},
+                    ],
+                    "minimum_should_match": 0,
+                }
+            },
+            "size": top_k,
         }
         resp = self.client.search(index=ES_INDEX, body=body)
         return [
