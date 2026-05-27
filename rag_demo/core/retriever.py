@@ -1,4 +1,4 @@
-# core/retriever.py — Search Pipeline
+﻿# core/retriever.py — Search Pipeline
 """
 Pipeline:
   1. Query Rewrite  — LLM viết lại thành 3 phiên bản
@@ -17,15 +17,13 @@ import unicodedata
 
 from db.meta_db    import MetaDB
 from db.vector_db  import VectorDB
-from db.keyword_db import KeywordDB
 from db.graph_db   import GraphDB
 from core.embedder import embed_query
+from core.self_query import self_query
 from llm.client    import AsyncLLMClient
 from llm.prompts   import (QUERY_REWRITE_SYSTEM, QUERY_REWRITE_USER,
                             ANSWER_SYSTEM, ANSWER_USER)
 from config        import SEARCH_TOP_K, RRF_TOP_K, FINAL_TOP_K, RRF_K, SOURCE_MIN_RRF
-
-SOURCE_DISPLAY_MIN_RRF = max(SOURCE_MIN_RRF, 0.02)
 
 
 def _normalize_text(text: str) -> str:
@@ -97,11 +95,13 @@ async def rewrite_query(query: str, llm: AsyncLLMClient) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 # BƯỚC 2: Parallel Search
 # ─────────────────────────────────────────────────────────────────────────────
-def search_qdrant(vector_db: VectorDB, query_text: str, top_k: int) -> list:
-    return vector_db.search(embed_query(query_text), top_k=top_k)
-
-def search_es(kw_db: KeywordDB, query_text: str, top_k: int) -> list:
-    return kw_db.search(query_text, top_k=top_k)
+def search_qdrant(vector_db: VectorDB, query_text: str, top_k: int, qdrant_filter=None) -> list:
+    return vector_db.search(
+        query_vector=embed_query(query_text),
+        query_text=query_text,
+        top_k=top_k,
+        qdrant_filter=qdrant_filter,
+    )
 
 def search_neo4j(graph_db: GraphDB, query_text: str, top_k: int) -> list:
     entities = graph_db.extract_entities_simple(query_text)
@@ -132,6 +132,31 @@ def rrf_merge(results_per_db: list, k: int = RRF_K, top_n: int = RRF_TOP_K) -> l
         {**meta[cid], "rrf_score": round(scores[cid], 6)}
         for cid in ranked[:top_n]
     ]
+
+
+def merge_with_qdrant_guard(rrf_items: list, qdrant_items: list, top_n: int) -> list:
+    """
+    Giữ ổn định chất lượng Qdrant:
+    - Lấy danh sách RRF trước
+    - Nếu thiếu item thì bơm thêm từ top Qdrant theo thứ tự gốc
+    """
+    out = list(rrf_items)
+    seen = {x.get("chunk_id") for x in out}
+    for q in qdrant_items:
+        if len(out) >= top_n:
+            break
+        cid = q.get("chunk_id")
+        if not cid or cid in seen:
+            continue
+        out.append({
+            "chunk_id": cid,
+            "title": q.get("title", ""),
+            "sources": [q.get("source", "qdrant_hybrid")],
+            "rrf_score": 0.0,
+            "parent_id": q.get("parent_id", ""),
+        })
+        seen.add(cid)
+    return out[:top_n]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -179,8 +204,6 @@ async def resolve_l1_context(top_chunks: list, meta_db: MetaDB) -> tuple[list, l
             chunk.get("rrf_score", 0.0),
         )
 
-    top1_rrf = max((g["best_rrf"] for g in parent_groups.values()), default=0)
-
     # Fetch L1 raw_text
     parent_rows = await meta_db.get_parent_chunks(list(parent_groups.keys()))
     parent_map  = {r["chunk_id"]: r for r in parent_rows}
@@ -193,11 +216,8 @@ async def resolve_l1_context(top_chunks: list, meta_db: MetaDB) -> tuple[list, l
     result = []
     for pid, group in parent_groups.items():
         rrf = group["best_rrf"]
-        if rrf < SOURCE_DISPLAY_MIN_RRF and rrf < top1_rrf:
-            continue
-
         p = parent_map.get(pid, {})
-        content = (p.get("raw_text") or "").strip()   # ← raw_text của L1
+        content = (p.get("raw_text") or "").strip()
         if not content:
             continue
 
@@ -255,42 +275,10 @@ async def generate_answer(query: str, context_chunks: list,
     )
 
 
-def _extract_numeric_tokens(text: str) -> list[str]:
-    return re.findall(r"\d[\d\.\,]*%?", text or "")
-
-
-def _repair_citations(answer: str, context_chunks: list) -> str:
-    if not answer or not context_chunks:
-        return answer
-
-    ctx_texts = [(c.get("raw_text") or "") for c in context_chunks]
-    lines = answer.splitlines()
-    fixed_lines = []
-
-    for line in lines:
-        nums = _extract_numeric_tokens(line)
-        if not nums:
-            fixed_lines.append(line)
-            continue
-
-        hit_counter = {}
-        for n in nums:
-            for i, ctx in enumerate(ctx_texts, start=1):
-                if n and n in ctx:
-                    hit_counter[i] = hit_counter.get(i, 0) + 1
-
-        if not hit_counter:
-            fixed_lines.append(line)
-            continue
-
-        best_idx = max(hit_counter, key=hit_counter.get)
-        if re.search(r"\[\d+\]", line):
-            line = re.sub(r"\[\d+\]", f"[{best_idx}]", line)
-        else:
-            line = f"{line.rstrip()} [{best_idx}]"
-        fixed_lines.append(line)
-
-    return "\n".join(fixed_lines)
+def _is_metric_query(query: str) -> bool:
+    q = _normalize_text(query)
+    keys = ["roic", "roe", "roa", "ebitda", "margin", "ttm", "12 thang", "31 03 2025", "%"]
+    return any(k in q for k in keys) or bool(re.search(r"\d", q))
 
 
 def _print_db_results(name: str, items: list):
@@ -349,13 +337,11 @@ async def search(query: str, verbose: bool = True) -> dict:
 
     meta_db   = MetaDB()
     vector_db = VectorDB()
-    kw_db     = KeywordDB()
     graph_db  = GraphDB()
     llm       = AsyncLLMClient()
 
     await meta_db.connect()
     vector_db.connect()
-    kw_db.connect()
     graph_db.connect()
 
     try:
@@ -373,31 +359,49 @@ async def search(query: str, verbose: bool = True) -> dict:
             print(f"  technical : {variants['technical']}")
             print(f"  keywords  : {variants['keywords']}")
 
-        # ── Bước 2: Parallel Search ────────────────────────────────────────
+        # ── Bước 2: Self-query + Parallel Search ───────────────────────────
         if verbose:
-            print("\n[2/5] Search song song (Qdrant + ES + Neo4j)...")
-        qdrant_res, es_res, neo4j_res = await asyncio.gather(
-            asyncio.to_thread(search_qdrant, vector_db, variants["technical"], SEARCH_TOP_K),
-            asyncio.to_thread(search_es,     kw_db,     variants["original"],  SEARCH_TOP_K),
+            print("\n[2/5] Self-query + Search song song (Qdrant + Neo4j)...")
+        sq = await self_query(query, llm)
+        qdrant_query = sq.get("search_query") or variants["technical"]
+        qdrant_filter = sq.get("qdrant_filter")
+        if verbose:
+            print(f"  self_query.search_query: {qdrant_query}")
+            print(f"  self_query.filter_mode : {sq.get('filter_mode', 'none')}")
+            print(f"  self_query.filter_json : {json.dumps(sq.get('raw_parsed', {}), ensure_ascii=False)}")
+        qdrant_res, neo4j_res = await asyncio.gather(
+            asyncio.to_thread(search_qdrant, vector_db, qdrant_query, SEARCH_TOP_K, qdrant_filter),
             asyncio.to_thread(search_neo4j,  graph_db,  variants["keywords"],  SEARCH_TOP_K),
         )
+        if _is_metric_query(query):
+            for item in neo4j_res:
+                item["score"] = float(item.get("score", 0.0)) * 0.6
+                item["source"] = "neo4j_low_weight"
         if verbose:
-            print(f"  Qdrant: {len(qdrant_res)}  ES: {len(es_res)}  Neo4j: {len(neo4j_res)}")
+            print(f"  Qdrant: {len(qdrant_res)}  Neo4j: {len(neo4j_res)}")
             _print_db_results("Qdrant", qdrant_res)
-            _print_db_results("Elasticsearch", es_res)
             _print_db_results("Neo4j", neo4j_res)
 
         # ── Bước 3: RRF Merge ──────────────────────────────────────────────
         if verbose:
             print("\n[3/5] RRF merge...")
-        top_chunks = rrf_merge([qdrant_res, es_res, neo4j_res])
+        top_chunks = rrf_merge([qdrant_res, neo4j_res])
+        top_chunks = merge_with_qdrant_guard(top_chunks, qdrant_res, RRF_TOP_K)
+        # Enrich parent_id cho L2 chunks từ MetaDB nếu payload search chưa có.
+        l2_rrf_meta = await meta_db.get_context(
+            [c.get("chunk_id", "") for c in top_chunks if c.get("chunk_id")]
+        )
+        l2_rrf_map = {r.get("chunk_id"): r for r in l2_rrf_meta}
+        for c in top_chunks:
+            if not c.get("parent_id"):
+                c["parent_id"] = l2_rrf_map.get(c.get("chunk_id"), {}).get("parent_id", "")
         if verbose:
             print(f"  Top {len(top_chunks)} L2 chunks sau RRF:")
             for i, c in enumerate(top_chunks, 1):
-                srcs = "+".join(c["sources"])
                 print(
-                    f"  {i}. rrf={c['rrf_score']:.5f} [{srcs}] "
-                    f"chunk_id={c['chunk_id']}  {c['title'][:50]!r}"
+                    f"  {i}. rrf={c.get('rrf_score', 0):.5f}  "
+                    f"chunk_id={c.get('chunk_id', '')}  "
+                    f"parent_id={c.get('parent_id', '')}"
                 )
 
         # ── Bước 4: Resolve L1 ─────────────────────────────────────────────
@@ -423,19 +427,19 @@ async def search(query: str, verbose: bool = True) -> dict:
         parent_sources = ranked_parents   # full list dùng cho hiển thị
 
         if verbose:
-            print(f"\n[debug] LLM context — {len(llm_context)} L1 chunks (raw_text full):")
-            for i, ctx in enumerate(llm_context, 1):
+            print(f"\n  -> {len(parent_sources)} L1 chunks sau dedupe theo parent_id:")
+            for i, ctx in enumerate(parent_sources, 1):
                 t   = (ctx.get("title") or "").strip()
                 sf  = (ctx.get("source_file") or "").strip()
                 txt = (ctx.get("raw_text") or "").strip().replace("\n", " ")
                 print(f"  [{i}] {t[:120]!r} | file={sf}")
                 print(f"      preview: {txt[:280]}")
+            print(f"  -> Dung top {len(llm_context)} L1 cho LLM (FINAL_TOP_K={FINAL_TOP_K})")
 
         # ── Bước 5: Generate ───────────────────────────────────────────────
         if verbose:
             print("\n[5/5] Generate answer...")
         answer     = await generate_answer(query, llm_context, llm)
-        answer     = _repair_citations(answer, llm_context)
 
         latency_ms = int((time.time() - t0) * 1000)
 

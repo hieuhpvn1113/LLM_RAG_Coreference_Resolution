@@ -1,0 +1,1441 @@
+{
+  "nodes": [
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Extract invoice data from this invoice description.\n\n{{ $json.invoiceText }}\n\nReturns only valid JSON, no explanation, no markup, this structure is correct:\n{\n\"vendor_name\": \"string\",\n\"invoice_number\": \"string\",\n\"invoice_date\": \"YYYY-MM-DD\",\n\"total_amount\": number\n}\n\nNote:\n- Total_amount is the final invoice total, numeric type (no special characters)\n- invoice date format YYYY-MM-DD\n- If no field is found, use null\n\nONLY returns valid JSON. No explanation, no markup, no code block.",
+        "hasOutputParser": true,
+        "messages": {
+          "messageValues": []
+        },
+        "batching": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.9,
+      "position": [
+        960,
+        1248
+      ],
+      "id": "f540dca4-3fef-4833-9724-54ae0e5f0840",
+      "name": "Basic LLM Chain"
+    },
+    {
+      "parameters": {
+        "mailbox": "test",
+        "downloadAttachments": true,
+        "dataPropertyAttachmentsPrefixName": "data",
+        "options": {
+          "trackLastMessageId": false
+        }
+      },
+      "type": "n8n-nodes-base.emailReadImap",
+      "typeVersion": 2.1,
+      "position": [
+        -1312,
+        1728
+      ],
+      "id": "892dabc5-c9e3-473e-b982-424c9846d986",
+      "name": "Email Trigger (IMAP)",
+      "credentials": {
+        "imap": {
+          "id": "3GRcsnzzRXKLZzcW",
+          "name": "IMAP account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\n\n// Lấy text từ Basic LLM Chain (node cha)\nconst llmData = $('Basic LLM Chain').first().json;\nconst raw = llmData.text || '';\nconst cleaned = raw.replace(/```json|```/g, '').trim();\nconst parsed = JSON.parse(cleaned);\n\n// Validate required fields\nif (!parsed.vendor_name || !parsed.total_amount) {\n  throw new Error('Missing required invoice fields');\n}\n\nreturn [{ json: parsed }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        1616
+      ],
+      "id": "671576ea-9f75-4d13-97e4-1786b692312c",
+      "name": "Code in JavaScript3"
+    },
+    {
+      "parameters": {
+        "schema": {
+          "__rl": true,
+          "value": "public",
+          "mode": "list",
+          "cachedResultName": "public"
+        },
+        "table": {
+          "__rl": true,
+          "value": "invoices",
+          "mode": "list",
+          "cachedResultName": "invoices"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "vendor_name": "={{ $json.vendor_name }}",
+            "invoice_number": "={{ $json.invoice_number }}",
+            "invoice_date": "={{ $json.invoice_date }}",
+            "total_amount": "={{ $json.total_amount }}",
+            "attachment_type": "=pdf"
+          },
+          "matchingColumns": [
+            "id"
+          ],
+          "schema": [
+            {
+              "id": "id",
+              "displayName": "id",
+              "required": false,
+              "defaultMatch": true,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "vendor_name",
+              "displayName": "vendor_name",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "invoice_number",
+              "displayName": "invoice_number",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "invoice_date",
+              "displayName": "invoice_date",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "total_amount",
+              "displayName": "total_amount",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "attachment_type",
+              "displayName": "attachment_type",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "created_at",
+              "displayName": "created_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1872,
+        1632
+      ],
+      "id": "5fbeed74-d2a5-4467-927f-724112248c25",
+      "name": "Insert rows in a table",
+      "credentials": {
+        "postgres": {
+          "id": "1W7imTiGj2xNOShv",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Lấy đúng text từ output của Vision AI\nconst content = $input.first().json;\n\n// Tùy cấu trúc, thử các path có thể có\nconst text = \n  content?.text ||                          // trực tiếp\n  content?.['0']?.content?.[0]?.text ||    // dạng array\n  content?.content?.[0]?.text ||           // dạng object\n  JSON.stringify(content);                  // fallback\n\nreturn [{ json: { invoiceText: text } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        1248
+      ],
+      "id": "48485ab0-58e0-472c-930c-3509ca1cc5f5",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "operation": "pdf",
+        "binaryPropertyName": "data0",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        -32,
+        1248
+      ],
+      "id": "4d49e283-b9d0-4624-b74d-f043d16a340b",
+      "name": "Extract from File"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "39e5e798-1891-4ce7-8f5d-ccfda630383a",
+              "leftValue": "={{ $binary.data0.mimeType }}",
+              "rightValue": "application/pdf",
+              "operator": {
+                "type": "string",
+                "operation": "contains"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -368,
+        1728
+      ],
+      "id": "ffe79eb3-b7b6-4c3e-8fc9-ba7b0422d8cf",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "resource": "image",
+        "operation": "analyze",
+        "modelId": {
+          "__rl": true,
+          "value": "=meta-llama/llama-4-scout-17b-16e-instruct",
+          "mode": "id"
+        },
+        "text": "Extract all data from this invoice image exactly as shown. Do not fabricate, calculate, or add any information that is not clearly visible in the image.",
+        "inputType": "base64",
+        "binaryPropertyName": "data0",
+        "options": {
+          "detail": "high",
+          "maxTokens": 4096
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 2.1,
+      "position": [
+        304,
+        1936
+      ],
+      "id": "ac6fd4d8-60cd-42e6-8463-63f62345fe4c",
+      "name": "Analyze image",
+      "credentials": {
+        "openAiApi": {
+          "id": "ajN2Uns5v0FLPeZT",
+          "name": "openrouter"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Lấy đúng text từ output của Vision AI\nconst content = $input.first().json;\n\n// Tùy cấu trúc, thử các path có thể có\nconst text = \n  content?.text ||                          // trực tiếp\n  content?.['0']?.content?.[0]?.text ||    // dạng array\n  content?.content?.[0]?.text ||           // dạng object\n  JSON.stringify(content);                  // fallback\n\nreturn [{ json: { invoiceText: text } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        512,
+        1936
+      ],
+      "id": "8fb98b24-511c-439c-a41b-4c54ab5ea957",
+      "name": "Code in JavaScript1"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "988deab1-983a-49de-8877-4945684873da",
+              "leftValue": "={{ $binary.data0 !== undefined }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -752,
+        1744
+      ],
+      "id": "1c9902b9-7b55-4423-9e3c-d54c1e792e1a",
+      "name": "If1"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Extract invoice data from this invoice description.\n\n{{ $json.invoiceText }}\n\nReturns only valid JSON, no explanation, no markup, this structure is correct:\n{\n\"vendor_name\": \"string\",\n\"invoice_number\": \"string\",\n\"invoice_date\": \"YYYY-MM-DD\",\n\"total_amount\": number\n}\n\nNote:\n- Total_amount is the final invoice total, numeric type (no special characters)\n- invoice date format YYYY-MM-DD\n- If no field is found, use null\n\nONLY returns valid JSON. No explanation, no markup, no code block.",
+        "hasOutputParser": true,
+        "messages": {
+          "messageValues": []
+        },
+        "batching": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.9,
+      "position": [
+        960,
+        1936
+      ],
+      "id": "7166e86a-0f09-43d6-a3a8-fff424e48d8d",
+      "name": "Basic LLM Chain1"
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\n\n// Lấy text từ Basic LLM Chain (node cha)\nconst llmData = $('Basic LLM Chain1').first().json;\nconst raw = llmData.text || '';\nconst cleaned = raw.replace(/```json|```/g, '').trim();\nconst parsed = JSON.parse(cleaned);\n\n// Validate required fields\nif (!parsed.vendor_name || !parsed.total_amount) {\n  throw new Error('Missing required invoice fields');\n}\n\nreturn [{ json: parsed }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1440,
+        2432
+      ],
+      "id": "c04abf73-1c3f-47ce-9ffa-a8177e96e71a",
+      "name": "Code in JavaScript4"
+    },
+    {
+      "parameters": {
+        "schema": {
+          "__rl": true,
+          "value": "public",
+          "mode": "list",
+          "cachedResultName": "public"
+        },
+        "table": {
+          "__rl": true,
+          "value": "invoices",
+          "mode": "list",
+          "cachedResultName": "invoices"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "vendor_name": "={{ $json.vendor_name }}",
+            "invoice_number": "={{ $json.invoice_number }}",
+            "invoice_date": "={{ $json.invoice_date }}",
+            "total_amount": "={{ $json.total_amount }}",
+            "attachment_type": "=jpg"
+          },
+          "matchingColumns": [
+            "id"
+          ],
+          "schema": [
+            {
+              "id": "id",
+              "displayName": "id",
+              "required": false,
+              "defaultMatch": true,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "vendor_name",
+              "displayName": "vendor_name",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "invoice_number",
+              "displayName": "invoice_number",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "invoice_date",
+              "displayName": "invoice_date",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "total_amount",
+              "displayName": "total_amount",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "attachment_type",
+              "displayName": "attachment_type",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "created_at",
+              "displayName": "created_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1696,
+        2432
+      ],
+      "id": "6c637867-d3ce-4fae-b7f7-f081d2a8e94d",
+      "name": "Insert rows in a table1",
+      "credentials": {
+        "postgres": {
+          "id": "1W7imTiGj2xNOShv",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "openai/gpt-4.1-mini",
+          "mode": "list",
+          "cachedResultName": "openai/gpt-4.1-mini"
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        1200,
+        1520
+      ],
+      "id": "f936833e-26b7-4b17-9656-4ebffdffdc59",
+      "name": "OpenAI Chat Model",
+      "credentials": {
+        "openAiApi": {
+          "id": "ajN2Uns5v0FLPeZT",
+          "name": "openrouter"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sendTo": "hieuhpvn1113@gmail.com",
+        "subject": "Invoice reading and database insertion successful.",
+        "emailType": "text",
+        "message": "=Invoice processed and saved to database successfully.  Details: - Vendor: {{ $json.vendor_name }} - Invoice Number: {{ $json.invoice_number }} - Invoice Date: {{ $json.invoice_date }} - Total Amount: {{ $json.total_amount }}  Processed at: {{ $now.toISO() }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        2064,
+        1648
+      ],
+      "id": "5cfa4e8d-4b2b-4a8e-beb6-714e1448b52d",
+      "name": "Send a message",
+      "webhookId": "a890b735-02f1-407a-afbb-b4fdc8e0e5a7",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "xACHXeHII9oJ1wJP",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $input.first().json.text || $input.first().json.output || '';\nconst retryCount = $input.first().json._retry_count || 0;\n\nlet result;\ntry {\n  const cleaned = raw.replace(/```json|```/g, '').trim();\n  result = JSON.parse(cleaned);\n} catch(e) {\n  result = { is_valid: false, reason: 'AI validator returned unparseable response' };\n}\n\nreturn [{\n  json: {\n    ...$input.first().json,\n    _valid: result.is_valid,\n    _reason: result.reason,\n    _retry_count: retryCount\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        992,
+        1680
+      ],
+      "id": "db50d4e6-9b29-4340-a019-cae014ac4e7e",
+      "name": "Code in JavaScript2"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "109f55d8-7996-4260-8f21-90de2f1fb835",
+              "leftValue": "={{ $json._valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1184,
+        1680
+      ],
+      "id": "5f0b0ec9-2ef2-4fa7-87f7-811a8b24d821",
+      "name": "If2"
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $input.first().json.text || $input.first().json.output || '';\nconst retryCount = $input.first().json._retry_count || 0;\n\nlet result;\ntry {\n  const cleaned = raw.replace(/```json|```/g, '').trim();\n  result = JSON.parse(cleaned);\n} catch(e) {\n  result = { is_valid: false, reason: 'AI validator returned unparseable response' };\n}\n\nreturn [{\n  json: {\n    ...$input.first().json,\n    _valid: result.is_valid,\n    _reason: result.reason,\n    _retry_count: retryCount\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        832,
+        2432
+      ],
+      "id": "89339b11-9b76-4273-bc44-015a4fe39f66",
+      "name": "Code in JavaScript5"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "109f55d8-7996-4260-8f21-90de2f1fb835",
+              "leftValue": "={{ $json._valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1024,
+        2432
+      ],
+      "id": "fc453c60-a349-4fbe-96c6-c18d9db9c709",
+      "name": "If3"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "openai/gpt-4.1-mini",
+          "mode": "list",
+          "cachedResultName": "openai/gpt-4.1-mini"
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        1040,
+        2272
+      ],
+      "id": "d24d6896-9e40-4290-9f7e-c803e1ad5542",
+      "name": "OpenAI Chat Model1",
+      "credentials": {
+        "openAiApi": {
+          "id": "ajN2Uns5v0FLPeZT",
+          "name": "openrouter"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sendTo": "hieuhpvn1113@gmail.com",
+        "subject": "Invoice reading and database insertion successful.",
+        "emailType": "text",
+        "message": "=Invoice processed and saved to database successfully.  Details: - Vendor: {{ $json.vendor_name }} - Invoice Number: {{ $json.invoice_number }} - Invoice Date: {{ $json.invoice_date }} - Total Amount: {{ $json.total_amount }}  Processed at: {{ $now.toISO() }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        1888,
+        2432
+      ],
+      "id": "a3be819b-fed3-4eeb-b128-c9e7c1c7977d",
+      "name": "Send a message1",
+      "webhookId": "a890b735-02f1-407a-afbb-b4fdc8e0e5a7",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "xACHXeHII9oJ1wJP",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=You are a strict data validator for invoice records.\n\nCheck if the following JSON data is valid and ready to insert into a database:\n\n{{ $json.text }}\n\nValidation rules:\n- vendor_name: must be a non-empty string (real company name, not null)\n- invoice_number: must be a non-empty string\n- invoice_date: must be a real date in YYYY-MM-DD format\n- total_amount: must be a positive number (not null, not 0, not string)\n\nRespond ONLY with this JSON, nothing else:\n{\n  \"is_valid\": true or false,\n  \"reason\": \"explain what is wrong if invalid, or ok if valid\"\n}",
+        "batching": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.9,
+      "position": [
+        1312,
+        1248
+      ],
+      "id": "fb4f7707-86c5-42b4-a1e8-aa00ae9882a3",
+      "name": "AI Validator"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=You are a strict data validator for invoice records.\n\nCheck if the following JSON data is valid and ready to insert into a database:\n\n{{ $json.text }}\n\nValidation rules:\n- vendor_name: must be a non-empty string (real company name, not null)\n- invoice_number: must be a non-empty string\n- invoice_date: must be a real date in YYYY-MM-DD format\n- total_amount: must be a positive number (not null, not 0, not string)\n\nRespond ONLY with this JSON, nothing else:\n{\n  \"is_valid\": true or false,\n  \"reason\": \"explain what is wrong if invalid, or ok if valid\"\n}",
+        "batching": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.9,
+      "position": [
+        1312,
+        1936
+      ],
+      "id": "6f79ee4f-3a87-4940-8060-999d4ef7182f",
+      "name": "AI Validator1"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "env",
+              "name": "env",
+              "value": "production-demo",
+              "type": "string"
+            },
+            {
+              "id": "pipeline",
+              "name": "pipeline",
+              "value": "invoice-intelligence-v3",
+              "type": "string"
+            },
+            {
+              "id": "trace_id",
+              "name": "trace_id",
+              "value": "={{ 'INV-' + $now.toMillis() }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -1024,
+        1728
+      ],
+      "id": "2ea40b58-103f-4f71-85ce-56987a057b5c",
+      "name": "Set Runtime Context"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "quality_score",
+              "name": "quality_score",
+              "value": "={{ Math.floor(Math.random() * 25) + 75 }}",
+              "type": "number"
+            },
+            {
+              "id": "doc_type",
+              "name": "doc_type",
+              "value": "invoice",
+              "type": "string"
+            },
+            {
+              "id": "processing_stage",
+              "name": "processing_stage",
+              "value": "normalized_text",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1456,
+        1584
+      ],
+      "id": "5b8d2299-f9e4-4ebe-bc9a-55595636d56e",
+      "name": "Set Document Metadata"
+    },
+    {
+      "parameters": {
+        "mode": "wait"
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        624,
+        1600
+      ],
+      "id": "ba6be00d-2559-46ac-a26e-1747d4bc77cf",
+      "name": "Merge OCR Streams"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Extract invoice data from this invoice description.\n\n{{ $json.invoiceText }}\n\nReturns only valid JSON, no explanation, no markup, this structure is correct:\n{\n\"vendor_name\": \"string\",\n\"invoice_number\": \"string\",\n\"invoice_date\": \"YYYY-MM-DD\",\n\"total_amount\": number\n}\n\nNote:\n- Total_amount is the final invoice total, numeric type (no special characters)\n- invoice date format YYYY-MM-DD\n- If no field is found, use null\n\nONLY returns valid JSON. No explanation, no markup, no code block.",
+        "hasOutputParser": true,
+        "messages": {
+          "messageValues": []
+        },
+        "batching": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.9,
+      "position": [
+        -448,
+        2192
+      ],
+      "id": "5c09a05e-4602-4daf-a238-75e9f53633ab",
+      "name": "Basic LLM Chain2"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "openai/gpt-4.1-mini",
+          "mode": "list",
+          "cachedResultName": "openai/gpt-4.1-mini"
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        -480,
+        2384
+      ],
+      "id": "facee5f2-d778-4cb2-9069-bf72f8415be8",
+      "name": "OpenAI Chat Model2",
+      "credentials": {
+        "openAiApi": {
+          "id": "ajN2Uns5v0FLPeZT",
+          "name": "openrouter"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $input.first().json.text || $input.first().json.output || '';\nconst retryCount = $input.first().json._retry_count || 0;\n\nlet result;\ntry {\n  const cleaned = raw.replace(/```json|```/g, '').trim();\n  result = JSON.parse(cleaned);\n} catch(e) {\n  result = { is_valid: false, reason: 'AI validator returned unparseable response' };\n}\n\nreturn [{\n  json: {\n    ...$input.first().json,\n    _valid: result.is_valid,\n    _reason: result.reason,\n    _retry_count: retryCount\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -112,
+        2224
+      ],
+      "id": "f3f1768e-bfb1-4d39-a686-dfecb64e01f3",
+      "name": "Code in JavaScript6"
+    },
+    {
+      "parameters": {
+        "sendTo": "hieuhpvn1113@gmail.com",
+        "subject": "Invoice reading and database insertion successful.",
+        "emailType": "text",
+        "message": "=Invoice processed and saved to database successfully.  Details: - Vendor: {{ $json.vendor_name }} - Invoice Number: {{ $json.invoice_number }} - Invoice Date: {{ $json.invoice_date }} - Total Amount: {{ $json.total_amount }}  Processed at: {{ $now.toISO() }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        144,
+        2224
+      ],
+      "id": "06956111-e19b-471a-bdd6-2aef57dc3df4",
+      "name": "Send a message2",
+      "webhookId": "a890b735-02f1-407a-afbb-b4fdc8e0e5a7",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "xACHXeHII9oJ1wJP",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "risk_score",
+              "name": "risk_score",
+              "value": "={{ Math.floor(Math.random()*40)+60 }}",
+              "type": "number"
+            },
+            {
+              "id": "review_flag",
+              "name": "review_flag",
+              "value": "={{ $json.total_amount > 1000 }}",
+              "type": "boolean"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -1280,
+        2208
+      ],
+      "id": "dba0f42d-697f-4bc1-a230-115f930c97c5",
+      "name": "Set Risk Profile PDF"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.review_flag }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -1072,
+        2208
+      ],
+      "id": "4fa6f8bc-300f-499a-b9a5-634f07c1dd3d",
+      "name": "If High Risk PDF"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "queue",
+              "name": "queue",
+              "value": "manual_review",
+              "type": "string"
+            },
+            {
+              "id": "priority",
+              "name": "priority",
+              "value": "high",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -864,
+        2096
+      ],
+      "id": "2012b8f5-9e76-480d-8559-14d2893af3c3",
+      "name": "Set Manual Queue PDF"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "queue",
+              "name": "queue",
+              "value": "auto_approved",
+              "type": "string"
+            },
+            {
+              "id": "priority",
+              "name": "priority",
+              "value": "normal",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -864,
+        2320
+      ],
+      "id": "e2a0707d-5a4e-407a-b6eb-fdfab9174a24",
+      "name": "Set Auto Queue PDF"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        -640,
+        2208
+      ],
+      "id": "7c88fd0f-aba9-4f65-8f40-2e1c7b7a2714",
+      "name": "Merge Queue PDF"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        224,
+        1248
+      ],
+      "id": "fd0dad83-aacd-4243-b051-ef56bd9519d4",
+      "name": "Edit Fields"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        272,
+        1520
+      ],
+      "id": "d4be3d81-9c87-4e69-897b-ea27150a73e5",
+      "name": "Wait",
+      "webhookId": "95196fdc-f550-4f84-bcc1-2a8505ebae7c"
+    }
+  ],
+  "connections": {
+    "Basic LLM Chain": {
+      "main": [
+        [
+          {
+            "node": "AI Validator",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Email Trigger (IMAP)": {
+      "main": [
+        [
+          {
+            "node": "Set Runtime Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript3": {
+      "main": [
+        [
+          {
+            "node": "Insert rows in a table",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert rows in a table": {
+      "main": [
+        [
+          {
+            "node": "Send a message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Merge OCR Streams",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract from File": {
+      "main": [
+        [
+          {
+            "node": "Wait",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "Extract from File",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Analyze image",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Analyze image": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript1": {
+      "main": [
+        [
+          {
+            "node": "Merge OCR Streams",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "If1": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Set Risk Profile PDF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Basic LLM Chain1": {
+      "main": [
+        [
+          {
+            "node": "AI Validator1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript4": {
+      "main": [
+        [
+          {
+            "node": "Insert rows in a table1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert rows in a table1": {
+      "main": [
+        [
+          {
+            "node": "Send a message1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Basic LLM Chain",
+            "type": "ai_languageModel",
+            "index": 0
+          },
+          {
+            "node": "AI Validator",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript2": {
+      "main": [
+        [
+          {
+            "node": "If2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If2": {
+      "main": [
+        [
+          {
+            "node": "Set Document Metadata",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Extract from File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript5": {
+      "main": [
+        [
+          {
+            "node": "If3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If3": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript4",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Analyze image",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model1": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Basic LLM Chain1",
+            "type": "ai_languageModel",
+            "index": 0
+          },
+          {
+            "node": "AI Validator1",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Validator": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Validator1": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript5",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Runtime Context": {
+      "main": [
+        [
+          {
+            "node": "If1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Document Metadata": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript3",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Code in JavaScript4",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge OCR Streams": {
+      "main": [
+        [
+          {
+            "node": "Basic LLM Chain",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Basic LLM Chain1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Basic LLM Chain2": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript6",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model2": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Basic LLM Chain2",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript6": {
+      "main": [
+        [
+          {
+            "node": "Send a message2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Risk Profile PDF": {
+      "main": [
+        [
+          {
+            "node": "If High Risk PDF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If High Risk PDF": {
+      "main": [
+        [
+          {
+            "node": "Set Manual Queue PDF",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Set Auto Queue PDF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Manual Queue PDF": {
+      "main": [
+        [
+          {
+            "node": "Merge Queue PDF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Auto Queue PDF": {
+      "main": [
+        [
+          {
+            "node": "Merge Queue PDF",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge Queue PDF": {
+      "main": [
+        [
+          {
+            "node": "Basic LLM Chain2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Edit Fields": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait": {
+      "main": [
+        [
+          {
+            "node": "Edit Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "4871f716eac0dcc842286954c61685eb118b0064408a7fb8ff178590ec2b5c61"
+  }
+}

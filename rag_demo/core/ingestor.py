@@ -5,14 +5,16 @@ Pipeline:
   2.  Check duplicate
   3.  Insert Document (status='processing')
   4.  Hierarchical Split → Level 1 Sections
-  5.  Insert L1 chunks (null links trước, update links sau) + Neo4j
+  5.  Insert L1 chunks + Neo4j
   6.  Semantic Split (embedding) → Level 2 Paragraphs
-  7.  Insert L2 chunks (null links trước, update links sau)
+  7.  Insert L2 chunks
   8.  LLM Enrichment: title, summary, keywords, entities, hypo_questions
   9.  Update enrichment vào PostgreSQL
-  10. Embed Level 2 chunks (intfloat/multilingual-e5-large, batch)
-  11. Write → Qdrant (vector + metadata nhỏ) + ES (inverted index) + Neo4j (graph)
+  10. Embed Level 2 chunks (dense, batch)
+  11. Write → Qdrant (dense + sparse BM25 + filter metadata) + Neo4j (graph)
   12. Finalize (status='ready')
+
+ES đã bị loại bỏ — BM25 nay chạy trong Qdrant dưới dạng sparse vector.
 """
 
 import asyncio
@@ -22,20 +24,15 @@ from pathlib import Path
 from core.chunker     import hierarchical_split, semantic_split, clean_text
 from core.enricher    import enrich_chunk
 from core.embedder    import embed_batch
-from core.file_parser import parse_file                   # ← thêm mới
+from core.file_parser import parse_file
 from db.meta_db       import MetaDB
 from db.vector_db     import VectorDB
-from db.keyword_db    import KeywordDB
 from db.graph_db      import GraphDB
 from llm.client       import AsyncLLMClient
 from config           import EMBED_MODEL
 
 
 async def _insert_chunks_then_link(meta_db: MetaDB, chunks: list):
-    """
-    Insert tất cả chunks với prev_id=None / next_id=None trước,
-    sau đó mới update_chunk_links — tránh ForeignKeyViolationError.
-    """
     for chunk in chunks:
         await meta_db.insert_chunk({**chunk, 'prev_id': None, 'next_id': None})
     for chunk in chunks:
@@ -59,19 +56,19 @@ async def ingest_file(file_path: str, force: bool = False) -> str:
 
     meta_db   = MetaDB()
     vector_db = VectorDB()
-    kw_db     = KeywordDB()
     graph_db  = GraphDB()
     llm       = AsyncLLMClient()
 
     await meta_db.connect()
-    vector_db.connect();   vector_db.ensure_collection()
-    kw_db.connect();       kw_db.ensure_index()
-    graph_db.connect();    graph_db.ensure_constraints()
+    vector_db.connect()
+    vector_db.ensure_collection()
+    graph_db.connect()
+    graph_db.ensure_constraints()
 
     try:
-        # ── 1. Đọc file (txt / pdf / docx / ...) ─────────────────────────────
+        # ── 1. Đọc file ───────────────────────────────────────────────────────
         print("\n[1/7] Đọc file...")
-        raw_text = await parse_file(path)            # ← thay _read_text_smart
+        raw_text = await parse_file(path)
         text     = clean_text(raw_text)
         print(f"  File size : {path.stat().st_size:,} bytes")
         print(f"  Text len  : {len(text):,} chars")
@@ -95,7 +92,7 @@ async def ingest_file(file_path: str, force: bool = False) -> str:
         graph_db.upsert_document(doc_id, path.name)
         print(f"  doc_id: {doc_id}")
 
-        # ── 4+5. Hierarchical Split L1, insert + link ─────────────────────────
+        # ── 4+5. Hierarchical Split L1 ────────────────────────────────────────
         print("\n[3/7] Hierarchical split (Level 1 — Sections)...")
         l1_chunks = hierarchical_split(text, doc_id, path.name)
         print(f"  → {len(l1_chunks)} sections")
@@ -106,13 +103,11 @@ async def ingest_file(file_path: str, force: bool = False) -> str:
         for chunk in l1_chunks:
             if chunk.get('prev_id') or chunk.get('next_id'):
                 await meta_db.update_chunk_links(
-                    chunk['chunk_id'],
-                    chunk.get('prev_id'),
-                    chunk.get('next_id'),
+                    chunk['chunk_id'], chunk.get('prev_id'), chunk.get('next_id'),
                 )
 
-        # ── 6+7. Semantic Split L2 (embedding), insert + link ─────────────────
-        print("\n[4/7] Semantic split (Level 2 — Paragraphs, embedding)...")
+        # ── 6+7. Semantic Split L2 ────────────────────────────────────────────
+        print("\n[4/7] Semantic split (Level 2 — Paragraphs)...")
         all_l2_chunks = []
         for i, section in enumerate(l1_chunks, 1):
             l2 = semantic_split(section, doc_id)
@@ -144,15 +139,16 @@ async def ingest_file(file_path: str, force: bool = False) -> str:
 
         # ── 10. Embedding ─────────────────────────────────────────────────────
         print(f"\n[6/7] Embedding {len(enriched_chunks)} chunks ({EMBED_MODEL})...")
-        vectors = embed_batch([c['clean_text'] for c in enriched_chunks])
-        print(f"  → {len(vectors)} vectors, dim={len(vectors[0])}")
+        dense_vectors = embed_batch([c['clean_text'] for c in enriched_chunks])
+        print(f"  → {len(dense_vectors)} dense vectors, dim={len(dense_vectors[0])}")
         for chunk in enriched_chunks:
             await meta_db.mark_embedded(chunk['chunk_id'], EMBED_MODEL)
 
-        # ── 11. Write → Qdrant + ES + Neo4j ──────────────────────────────────
-        print(f"\n[7/7] Write → Qdrant + Elasticsearch + Neo4j...")
-        vector_db.upsert_batch(enriched_chunks, vectors)
-        kw_db.index_batch(enriched_chunks)
+        # ── 11. Write → Qdrant (dense + sparse BM25) + Neo4j ─────────────────
+        print(f"\n[7/7] Write → Qdrant (dense + sparse BM25) + Neo4j...")
+        vector_db.upsert_batch(enriched_chunks, dense_vectors)
+        # sparse vector được tạo tự động bên trong upsert_batch
+
         print(f"  Neo4j: {len(enriched_chunks)} chunks + entities...")
         for chunk in enriched_chunks:
             graph_db.write_chunk_full(chunk)
@@ -177,7 +173,6 @@ async def ingest_file(file_path: str, force: bool = False) -> str:
 
 
 async def ingest_directory(dir_path: str, force: bool = False) -> list:
-    """Ingest tất cả file được hỗ trợ trong thư mục."""
     from core.file_parser import KREUZBERG_EXTENSIONS
     supported = {".txt"} | KREUZBERG_EXTENSIONS
     all_files = [
@@ -202,6 +197,5 @@ if __name__ == "__main__":
     args  = [a for a in sys.argv[1:] if a != '--force']
     if not args:
         print("Usage: python -m core.ingestor <file> [--force]")
-        print("       file có thể là: .txt .pdf .docx .xlsx .pptx .html .md")
         sys.exit(1)
     asyncio.run(ingest_file(args[0], force=force))

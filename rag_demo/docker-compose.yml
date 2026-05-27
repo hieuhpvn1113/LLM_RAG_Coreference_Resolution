@@ -1,10 +1,13 @@
 services:
 
+  # ── PostgreSQL — metadata, chunks, search logs ─────────────────────────────
   postgres:
     image: postgres:16-alpine
+    container_name: rag_postgres
+    restart: unless-stopped
     environment:
-      POSTGRES_DB: rag_db
-      POSTGRES_USER: rag_user
+      POSTGRES_DB:       rag_db
+      POSTGRES_USER:     rag_user
       POSTGRES_PASSWORD: rag_password
     ports:
       - "5433:5432"
@@ -17,71 +20,66 @@ services:
       timeout: 5s
       retries: 5
 
-  # ── GUI cho PostgreSQL → http://localhost:5050 ─────────────────────────────
+  # ── pgAdmin — GUI cho PostgreSQL → http://localhost:5050 ───────────────────
   pgadmin:
     image: dpage/pgadmin4:latest
+    container_name: rag_pgadmin
+    restart: unless-stopped
     environment:
-      PGADMIN_DEFAULT_EMAIL: admin@admin.com
+      PGADMIN_DEFAULT_EMAIL:    admin@admin.com
       PGADMIN_DEFAULT_PASSWORD: admin
     ports:
       - "5050:80"
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
+    volumes:
+      - pgadmin_storage:/var/lib/pgadmin
 
+  # ── Qdrant — dense vector + sparse BM25 hybrid ────────────────────────────
+  # Dashboard → http://localhost:6333/dashboard
   qdrant:
     image: qdrant/qdrant:latest
+    container_name: rag_qdrant
+    restart: unless-stopped
     ports:
-      - "6333:6333"
-      - "6334:6334"
+      - "6333:6333"   # REST API + Dashboard
+      - "6334:6334"   # gRPC
     volumes:
       - qdrant_storage:/qdrant/storage
-    # Dashboard có sẵn → http://localhost:6333/dashboard
-
-  elasticsearch:
-    image: elasticsearch:8.13.0
     environment:
-      - discovery.type=single-node
-      - xpack.security.enabled=false
-      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
-    ports:
-      - "9200:9200"
-    volumes:
-      - es_storage:/usr/share/elasticsearch/data
+      - QDRANT__SERVICE__GRPC_PORT=6334
     healthcheck:
-      test:
-        - "CMD-SHELL"
-        - "curl -s http://localhost:9200/_cluster/health | grep -qE '\"status\":\"(green|yellow)\"'"
-      interval: 30s
-      timeout: 10s
+      test: ["CMD-SHELL", "curl -sf http://localhost:6333/healthz || exit 1"]
+      interval: 15s
+      timeout: 5s
       retries: 5
 
-  # ── GUI cho Elasticsearch → http://localhost:5601 ──────────────────────────
-  kibana:
-    image: kibana:8.13.0
-    environment:
-      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
-    ports:
-      - "5601:5601"
-    depends_on:
-      - elasticsearch
-
+  # ── Neo4j — graph DB (entity + relation) ──────────────────────────────────
+  # Browser → http://localhost:7474  (user: neo4j / pass: password)
   neo4j:
     image: neo4j:5.18-community
+    container_name: rag_neo4j
+    restart: unless-stopped
     environment:
       - NEO4J_AUTH=neo4j/password
+      - NEO4J_PLUGINS=["apoc"]
+      - NEO4J_dbms_security_procedures_unrestricted=apoc.*
     ports:
-      - "7474:7474"   # Browser có sẵn → http://localhost:7474
-      - "7687:7687"
+      - "7474:7474"   # Browser
+      - "7687:7687"   # Bolt
     volumes:
       - neo4j_storage:/data
+      - neo4j_logs:/logs
     healthcheck:
       test: ["CMD-SHELL", "wget -O /dev/null -q http://localhost:7474 || exit 1"]
-      interval: 30s
+      interval: 20s
       timeout: 10s
       retries: 5
 
 volumes:
   pg_storage:
+  pgadmin_storage:
   qdrant_storage:
-  es_storage:
   neo4j_storage:
+  neo4j_logs:

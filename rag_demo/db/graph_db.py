@@ -2,6 +2,7 @@
 from neo4j import GraphDatabase
 from config import NEO4J_URL, NEO4J_USER, NEO4J_PASSWORD
 import re
+import unicodedata
 
 
 class GraphDB:
@@ -124,7 +125,7 @@ class GraphDB:
     # Entity Extraction từ Query
     # ─────────────────────────────────────────────────────────────────────────
 
-    def extract_entities_simple(self, user_query: str) -> list:
+    def extract_entities_simple(self, user_query) -> list:
         """
         Tìm entity names trong Neo4j khớp với query.
 
@@ -146,7 +147,14 @@ class GraphDB:
           entity = "Luật Giao thông đường bộ năm 2008"
           → entity CONTAINS phrase → MATCH ✓
         """
-        if not user_query or not user_query.strip():
+        if isinstance(user_query, list):
+            user_query = " ".join(str(x) for x in user_query if x is not None)
+        elif user_query is None:
+            user_query = ""
+        else:
+            user_query = str(user_query)
+
+        if not user_query.strip():
             return []
 
         # Tách thành các phrase tại dấu phẩy, sau đó tại khoảng trắng nếu quá dài
@@ -206,31 +214,57 @@ class GraphDB:
         Scoring: số entity khớp / tổng entity trong chunk
         → ưu tiên chunk nhỏ khớp chính xác hơn chunk lớn khớp 1/100 entity.
         """
-        if not query_entities:
-            return []
+        keyword_hints = self._extract_metric_keywords(" ".join(query_entities)) if query_entities else []
 
         with self.driver.session() as session:
             result = session.run(
                 """
-                UNWIND $entity_names AS ename
-                MATCH (e:Entity)
-                WHERE toLower(e.name) CONTAINS toLower(ename)
-                   OR toLower(ename) CONTAINS toLower(e.name)
-                MATCH (c:Chunk)-[:MENTIONS]->(e)
-                WHERE c.level = 2
-                WITH c, count(DISTINCT e) AS match_count
-                ORDER BY match_count DESC
+                CALL {
+                  WITH $entity_names AS entity_names
+                  UNWIND entity_names AS ename
+                  MATCH (e:Entity)
+                  WHERE toLower(e.name) CONTAINS toLower(ename)
+                     OR toLower(ename) CONTAINS toLower(e.name)
+                  MATCH (c:Chunk)-[:MENTIONS]->(e)
+                  WHERE c.level = 2
+                  RETURN c.chunk_id AS chunk_id, c.title AS title, c.summary AS summary,
+                         count(DISTINCT e) * 1.0 AS score
+                }
+                RETURN chunk_id, title, summary, score
+                ORDER BY score DESC
                 LIMIT $top_k
-                RETURN c.chunk_id AS chunk_id,
-                       c.title    AS title,
-                       c.summary  AS summary,
-                       match_count AS score
                 """,
                 entity_names=query_entities,
                 top_k=top_k,
-            )
-            rows = result.data()
+            ) if query_entities else None
+            rows = result.data() if result else []
 
+            if keyword_hints:
+                kw_result = session.run(
+                    """
+                    UNWIND $keywords AS kw
+                    MATCH (c:Chunk)
+                    WHERE c.level = 2
+                      AND (
+                        toLower(coalesce(c.title, "")) CONTAINS toLower(kw)
+                        OR toLower(coalesce(c.summary, "")) CONTAINS toLower(kw)
+                      )
+                    WITH c, count(DISTINCT kw) AS kw_score
+                    RETURN c.chunk_id AS chunk_id, c.title AS title, c.summary AS summary,
+                           kw_score * 0.7 AS score
+                    ORDER BY score DESC
+                    LIMIT $top_k
+                    """,
+                    keywords=keyword_hints,
+                    top_k=top_k,
+                )
+                rows.extend(kw_result.data())
+
+        merged = {}
+        for r in rows:
+            cid = r["chunk_id"]
+            if cid not in merged or float(r["score"]) > float(merged[cid]["score"]):
+                merged[cid] = r
         return [
             {
                 "chunk_id":   r["chunk_id"],
@@ -239,7 +273,7 @@ class GraphDB:
                 "clean_text": "",
                 "source":     "neo4j",
             }
-            for r in rows
+            for r in sorted(merged.values(), key=lambda x: float(x.get("score", 0.0)), reverse=True)[:top_k]
         ]
 
     def delete_by_doc(self, doc_id: str):
@@ -248,3 +282,22 @@ class GraphDB:
                 "MATCH (c:Chunk {doc_id: $doc_id}) DETACH DELETE c",
                 doc_id=doc_id,
             )
+    @staticmethod
+    def _norm(text: str) -> str:
+        text = unicodedata.normalize("NFKD", (text or "")).encode("ascii", "ignore").decode("ascii")
+        text = text.lower()
+        text = re.sub(r"[^a-z0-9\s/%\.]", " ", text)
+        return re.sub(r"\s+", " ", text).strip()
+
+    def _extract_metric_keywords(self, user_query: str) -> list:
+        q = self._norm(user_query)
+        seeds = [
+            "roic", "roe", "roa", "ebitda", "gross margin", "net margin", "bien loi nhuan",
+            "eps", "p/e", "p/b", "ttm", "12 thang", "6 thang"
+        ]
+        out = [s for s in seeds if s in q]
+        tokens = [t for t in q.split() if len(t) >= 3]
+        for t in tokens:
+            if re.search(r"\d", t) or t in ("quy", "nam", "thang", "ngay"):
+                out.append(t)
+        return list(dict.fromkeys(out))[:12]
