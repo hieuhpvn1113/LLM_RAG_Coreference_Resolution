@@ -1,38 +1,26 @@
-# Ragas Evaluation
+# Evaluation (Manual-Path Based)
 
-## 1) Cai dat
+Muc tieu: kiem tra RAG theo dung luong ban test tay, tuc la moi cau hoi deu chay:
+
+`python main.py query "<question>"`
+
+## Chay danh gia
 
 ```powershell
 cd E:\AI_agent\LLM_RAG\rag_demo
-pip install -r requirements.txt
-```
-
-## 2) Chay danh gia
-
-```powershell
-python evaluation\evaluate_ragas.py --dataset evaluation\dataset.jsonl
-```
-
-## 2.1) Tu dong tao bo cau hoi + dap an (AI)
-
-```powershell
-python evaluation\generate_testset.py --output evaluation\dataset.auto.jsonl
-```
-
-Sau do danh gia bo vua tao:
-
-```powershell
 python evaluation\evaluate_ragas.py --dataset evaluation\dataset.auto.jsonl
 ```
 
-## 3) Tuy chon
+## Tuy chon
 
-- `--output-dir evaluation\reports` : thu muc output
-- `--verbose` : in log retrieval/generation
+- `--output-dir evaluation\reports_v2` : thu muc output
+- `--f1-threshold 0.65` : nguong pass/fail
+- `--timeout-sec 180` : timeout moi query
 
-## 4) Ket qua
+## File ket qua
 
-Script se tao:
-- `overall_metrics.json`: diem tong the
-- `per_sample_scores.csv`: diem tung cau hoi
-- `run_details.json`: du lieu chi tiet run
+- `overall_metrics.json`: tong quan pass rate, avg F1, avg latency
+- `per_sample_scores.csv`: ket qua tung cau hoi
+- `failed_cases.json`: cac cau fail de debug
+- `run_details.json`: chi tiet day du cua run
+

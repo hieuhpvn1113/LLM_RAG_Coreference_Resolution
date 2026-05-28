@@ -24,8 +24,10 @@ Flow:
 """
 
 import re
+import json
 from typing import Optional
 from config import COREF_ENABLED, COREF_MODE
+from llm.client import LLMClient
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -376,6 +378,8 @@ def resolve_coref(text: str) -> str:
     COREF_MODE=rule      → chỉ Tier 1 rule-based (default)
     COREF_MODE=neural    → chỉ Tier 2 fastcoref
     COREF_MODE=both      → Tier 1 trước, Tier 2 sau
+    COREF_MODE=llm       → chỉ LLM coref
+    COREF_MODE=hybrid    → Tier 1 rule trước, sau đó LLM coref
     """
     if not COREF_ENABLED:
         return text
@@ -386,10 +390,14 @@ def resolve_coref(text: str) -> str:
 
     if mode == 'rule':
         resolved = resolve_coref_rules(text)
+    elif mode == 'llm':
+        resolved = resolve_coref_llm(text)
     elif mode == 'neural':
         resolved = resolve_coref_neural(text)
     elif mode == 'both':
         resolved = resolve_coref_neural(resolve_coref_rules(text))
+    elif mode == 'hybrid':
+        resolved = resolve_coref_llm(resolve_coref_rules(text))
     else:
         print(f"[coref] ⚠️  COREF_MODE='{mode}' không hợp lệ — dùng 'rule'.")
         resolved = resolve_coref_rules(text)
@@ -403,3 +411,60 @@ def _log_changes(original: str, resolved: str):
         return
     diff = abs(len(resolved.split()) - len(original.split()))
     print(f"[coref] ✓ {diff} token(s) changed ({len(original)} → {len(resolved)} chars)")
+
+
+_LLM_COREF_SYSTEM = """
+Ban la bo giai quyet dong tham chieu (coreference) tieng Viet cho van ban doanh nghiep/tai chinh.
+Nhiem vu:
+- Chi thay cac cum mo ho nhu: cong ty nay, doanh nghiep nay, don vi nay, ho, no, ben nay...
+- Bang ten thuc the ro rang da xuat hien trong CHINH doan van ban.
+- KHONG them thong tin moi, KHONG doi so lieu, KHONG doi ngay thang.
+
+Tra ve JSON THUAN voi cau truc:
+{
+  "resolved_text": "van ban sau khi sua coref"
+}
+""".strip()
+
+
+def _extract_json_object(raw: str) -> dict:
+    cleaned = re.sub(r'^```(?:json)?\s*', '', raw.strip(), flags=re.IGNORECASE)
+    cleaned = re.sub(r'\s*```$', '', cleaned)
+    try:
+        data = json.loads(cleaned)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        pass
+    m = re.search(r'\{.*\}', cleaned, re.DOTALL)
+    if not m:
+        return {}
+    try:
+        data = json.loads(m.group(0))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def resolve_coref_llm(text: str) -> str:
+    if not text or not text.strip():
+        return text
+    try:
+        llm = LLMClient()
+        raw = llm.complete(
+            system=_LLM_COREF_SYSTEM,
+            user=f"Van ban:\n{text}\n\nChi tra ve JSON.",
+            max_tokens=2400,
+        )
+        data = _extract_json_object(raw)
+        resolved = (data.get("resolved_text") or "").strip()
+        if not resolved:
+            print("[coref] ⚠️ LLM coref tra ve rong -> fallback rule-based")
+            return resolve_coref_rules(text)
+        # Guardrail: khong de van ban bi cat qua nhieu.
+        if len(resolved) < max(32, int(len(text) * 0.6)):
+            print("[coref] ⚠️ LLM coref output qua ngan -> fallback rule-based")
+            return resolve_coref_rules(text)
+        return resolved
+    except Exception as e:
+        print(f"[coref] ⚠️ LLM coref loi: {e} -> fallback rule-based")
+        return resolve_coref_rules(text)

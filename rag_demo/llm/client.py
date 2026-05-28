@@ -7,7 +7,7 @@ Endpoint: http://192.168.1.36:8881/v1
 Alias LLMClient / AsyncLLMClient giữ nguyên để không phá code cũ.
 """
 import httpx
-from config import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
+from config import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL, LLM_TEMPERATURE
 
 
 def _build_headers() -> dict:
@@ -21,7 +21,7 @@ def _build_payload(system: str, user: str, max_tokens: int) -> dict:
     return {
         "model":       LLM_MODEL,
         "max_tokens":  max_tokens,
-        "temperature": 0.1,
+        "temperature": LLM_TEMPERATURE,
         "messages": [
             {"role": "system", "content": system},
             {"role": "user",   "content": user},

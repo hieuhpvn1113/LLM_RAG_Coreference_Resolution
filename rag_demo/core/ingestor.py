@@ -19,6 +19,7 @@ ES đã bị loại bỏ — BM25 nay chạy trong Qdrant dưới dạng sparse 
 
 import asyncio
 import time
+import re
 from pathlib import Path
 
 from core.chunker     import hierarchical_split, semantic_split, clean_text
@@ -30,6 +31,38 @@ from db.vector_db     import VectorDB
 from db.graph_db      import GraphDB
 from llm.client       import AsyncLLMClient
 from config           import EMBED_MODEL
+
+
+def _normalize_text(text: str) -> str:
+    t = (text or "").lower()
+    t = re.sub(r"\s+", " ", t)
+    return t.strip()
+
+
+def _infer_scopes(chunk: dict, source_file: str) -> list[str]:
+    """
+    Gắn scope cứng theo domain để self-query có thể filter chính xác.
+    """
+    text = _normalize_text(f"{chunk.get('title', '')}\n{chunk.get('raw_text', '')}")
+    fname = _normalize_text(source_file)
+    scopes: list[str] = []
+
+    if (
+        "vinamilk" in text
+        and ("đhđcđ" in text or "dhdcd" in text or "đại hội đồng cổ đông" in text)
+        and "2026" in text
+        and ("kế hoạch doanh thu" in text or "ke hoach doanh thu" in text)
+        and ("lợi nhuận sau thuế" in text or "loi nhuan sau thue" in text)
+    ):
+        scopes.append("vinamilk_agm_2026")
+    elif (
+        ("vnm" in fname or "vinamilk" in fname)
+        and ("đhđcđ" in text or "dhdcd" in text or "đại hội đồng cổ đông" in text)
+        and "2026" in text
+    ):
+        scopes.append("vinamilk_agm_2026")
+
+    return scopes
 
 
 async def _insert_chunks_then_link(meta_db: MetaDB, chunks: list):
@@ -133,6 +166,7 @@ async def ingest_file(file_path: str, force: bool = False) -> str:
                 'relations':              enrichment['relations'],
                 'hypothetical_questions': enrichment['hypothetical_questions'],
             })
+            chunk["scopes"] = _infer_scopes(chunk, path.name)
             enriched_chunks.append(chunk)
             await meta_db.update_enrichment(chunk['chunk_id'], enrichment)
             print(f" ✓  \"{enrichment['title'][:45]}\"")

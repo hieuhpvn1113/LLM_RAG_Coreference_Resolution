@@ -1,231 +1,212 @@
-import argparse
-import asyncio
+﻿import argparse
+import csv
 import json
+import os
 import re
+import subprocess
 import sys
+import unicodedata
 from pathlib import Path
 
-import pandas as pd
-from datasets import Dataset
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from ragas import evaluate
-from ragas.metrics import (
-    answer_relevancy,
-    context_precision,
-    context_recall,
-    faithfulness,
-)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from config import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
-from core.retriever import search
 
 
-def _load_jsonl(path: Path) -> list[dict]:
-    text = path.read_text(encoding="utf-8").strip()
-    if not text:
-        return []
-
-    # 1) Try JSON array first.
-    if text.startswith("["):
-        data = json.loads(text)
-        if not isinstance(data, list):
-            raise ValueError("Dataset JSON must be a list of objects.")
-        return data
-
-    # 2) Try strict JSONL (one JSON object per line).
+def load_jsonl(path: Path) -> list[dict]:
     rows = []
-    ok_jsonl = True
-    for line in text.splitlines():
+    for line in path.read_text(encoding="utf-8-sig").splitlines():
         line = line.strip()
         if not line:
             continue
-        try:
-            rows.append(json.loads(line))
-        except json.JSONDecodeError:
-            ok_jsonl = False
-            break
-    if ok_jsonl and rows:
-        return rows
-
-    # 3) Fallback: multiple pretty JSON objects separated by blank lines.
-    decoder = json.JSONDecoder()
-    rows = []
-    idx = 0
-    n = len(text)
-    while idx < n:
-        while idx < n and text[idx].isspace():
-            idx += 1
-        if idx >= n:
-            break
-        obj, next_idx = decoder.raw_decode(text, idx)
-        if not isinstance(obj, dict):
-            raise ValueError("Each dataset item must be a JSON object.")
-        rows.append(obj)
-        idx = next_idx
+        rows.append(json.loads(line))
     return rows
 
 
-async def _run_rag(dataset_rows: list[dict], verbose: bool) -> list[dict]:
-    records = []
-    for idx, row in enumerate(dataset_rows, start=1):
-        question = row["question"]
-        result = await search(question, verbose=verbose)
-        contexts = [c.get("raw_text", "") for c in result.get("parent_sources", [])]
-        records.append(
-            {
-                "id": idx,
-                "question": question,
-                "answer": result.get("answer", ""),
-                "contexts": contexts,
-                "ground_truth": row.get("ground_truth", ""),
-            }
-        )
-    return records
+def normalize_text(text: str) -> str:
+    text = unicodedata.normalize("NFKC", text or "").lower()
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
 
 
-def _strip_citation_tags(text: str) -> str:
-    text = re.sub(r"\[\d+\]", "", text or "")
-    return re.sub(r"\s+", " ", text).strip()
+def fold_ascii(text: str) -> str:
+    text = unicodedata.normalize("NFD", text or "")
+    text = "".join(ch for ch in text if unicodedata.category(ch) != "Mn")
+    return normalize_text(text)
 
 
-def _normalize_text(text: str) -> str:
-    text = (text or "").lower().strip()
-    text = _strip_citation_tags(text)
-    text = re.sub(r"[^\w\s%/\.:-]", " ", text, flags=re.UNICODE)
-    return re.sub(r"\s+", " ", text).strip()
-
-
-def _is_factoid_question(question: str) -> bool:
-    q = (question or "").lower()
-    keys = ["bao nhiêu", "khi nào", "ngày", "%", "tỷ lệ", "mấy", "là gì", "bao lâu", "thời gian"]
-    return any(k in q for k in keys) or bool(re.search(r"\d", q))
-
-
-def _token_f1(pred: str, gold: str) -> float:
-    p_toks = _normalize_text(pred).split()
-    g_toks = _normalize_text(gold).split()
-    if not p_toks and not g_toks:
-        return 1.0
-    if not p_toks or not g_toks:
+def token_f1(pred: str, ref: str) -> float:
+    p = normalize_text(pred).split()
+    r = normalize_text(ref).split()
+    if not p or not r:
         return 0.0
-    common = {}
-    for t in p_toks:
-        common[t] = common.get(t, 0) + 1
-    hit = 0
-    for t in g_toks:
-        if common.get(t, 0) > 0:
-            hit += 1
-            common[t] -= 1
-    if hit == 0:
+
+    p_count = {}
+    r_count = {}
+    for t in p:
+        p_count[t] = p_count.get(t, 0) + 1
+    for t in r:
+        r_count[t] = r_count.get(t, 0) + 1
+
+    overlap = 0
+    for t, c in p_count.items():
+        overlap += min(c, r_count.get(t, 0))
+    if overlap == 0:
         return 0.0
-    precision = hit / len(p_toks)
-    recall = hit / len(g_toks)
+
+    precision = overlap / len(p)
+    recall = overlap / len(r)
     return 2 * precision * recall / (precision + recall)
 
 
-def _build_judge_models() -> tuple[ChatOpenAI, HuggingFaceEmbeddings]:
-    base_url = LLM_BASE_URL.rstrip("/")
-    llm = ChatOpenAI(
-        model=LLM_MODEL,
-        api_key=LLM_API_KEY,
-        base_url=base_url,
-        temperature=0,
+def extract_answer(raw_output: str) -> str:
+    lines = raw_output.splitlines()
+    for i, line in enumerate(lines):
+        marker = fold_ascii(line)
+        if "cau tra loi" in marker or ("tra loi" in marker and "ms" in marker):
+            for follow in lines[i + 1 :]:
+                s = follow.strip()
+                if not s or set(s) <= {"="}:
+                    continue
+                return s
+
+    for line in reversed(lines):
+        s = line.strip()
+        if s and set(s) != {"="}:
+            return s
+    return ""
+
+
+def run_manual_query(question: str, timeout_sec: int) -> dict:
+    cmd = [sys.executable, "main.py", "query", question]
+    env = dict(os.environ)
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+
+    proc = subprocess.run(
+        cmd,
+        cwd=str(PROJECT_ROOT),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout_sec,
+        env=env,
     )
-    # Use local embeddings to avoid dependency on /embeddings endpoint
-    embeddings = HuggingFaceEmbeddings(
-        model_name="intfloat/multilingual-e5-large"
-    )
-    return llm, embeddings
+
+    stdout = proc.stdout or ""
+    stderr = proc.stderr or ""
+    answer = extract_answer(stdout)
+
+    latency_ms = None
+    m = re.search(r"\((\d+)ms\)", stdout)
+    if m:
+        latency_ms = int(m.group(1))
+
+    return {
+        "returncode": proc.returncode,
+        "stdout": stdout,
+        "stderr": stderr,
+        "answer": answer,
+        "latency_ms": latency_ms,
+    }
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Evaluate RAG quality with Ragas")
-    parser.add_argument("--dataset", required=True, help="Path to JSONL dataset")
-    parser.add_argument("--output-dir", default="evaluation/reports", help="Output directory")
-    parser.add_argument("--verbose", action="store_true", help="Verbose RAG pipeline logs")
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+    parser = argparse.ArgumentParser(
+        description="Evaluate RAG by running the same manual CLI path as python main.py query"
+    )
+    parser.add_argument("--dataset", required=True, help="Path to dataset .jsonl")
+    parser.add_argument("--output-dir", default="evaluation/reports_v2", help="Output directory")
+    parser.add_argument("--f1-threshold", type=float, default=0.65, help="Threshold for pass/fail")
+    parser.add_argument("--timeout-sec", type=int, default=180, help="Timeout per query")
     args = parser.parse_args()
 
     dataset_path = Path(args.dataset)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    rows = _load_jsonl(dataset_path)
+    rows = load_jsonl(dataset_path)
     if not rows:
-        raise ValueError("Dataset is empty")
+        raise ValueError("Dataset is empty.")
 
-    rag_records = asyncio.run(_run_rag(rows, verbose=args.verbose))
+    results = []
+    for idx, row in enumerate(rows, start=1):
+        question = row["question"]
+        ground_truth = row.get("ground_truth", "")
 
-    eval_rows = []
-    for row in rag_records:
-        clean_answer = _strip_citation_tags(row["answer"])
-        eval_rows.append(
+        run = run_manual_query(question, timeout_sec=args.timeout_sec)
+        pred = run["answer"]
+
+        pred_n = normalize_text(pred)
+        gt_n = normalize_text(ground_truth)
+        exact = pred_n == gt_n and gt_n != ""
+        contains = (gt_n and gt_n in pred_n) or (pred_n and pred_n in gt_n)
+        f1 = token_f1(pred, ground_truth)
+        passed = (exact or contains) and f1 >= args.f1_threshold and run["returncode"] == 0
+
+        results.append(
             {
-                "question": row["question"],
-                "answer": clean_answer,
-                "contexts": row["contexts"],
-                "ground_truth": row["ground_truth"],
+                "id": idx,
+                "question": question,
+                "ground_truth": ground_truth,
+                "predicted": pred,
+                "exact_match": exact,
+                "contains_match": contains,
+                "token_f1": round(f1, 4),
+                "passed": passed,
+                "latency_ms": run["latency_ms"],
+                "returncode": run["returncode"],
+                "stderr": run["stderr"].strip(),
             }
         )
+        print(f"[{idx}/{len(rows)}] pass={passed} f1={f1:.3f} | {question}")
 
-    hf_dataset = Dataset.from_list(eval_rows)
-    llm, embeddings = _build_judge_models()
+    total = len(results)
+    passed_count = sum(1 for r in results if r["passed"])
+    failed = [r for r in results if not r["passed"]]
 
-    result = evaluate(
-        dataset=hf_dataset,
-        metrics=[faithfulness, answer_relevancy, context_precision, context_recall],
-        llm=llm,
-        embeddings=embeddings,
-    )
+    avg_f1 = sum(r["token_f1"] for r in results) / total if total else 0.0
+    avg_latency = sum((r["latency_ms"] or 0) for r in results) / total if total else 0.0
+    summary = {
+        "total": total,
+        "passed": passed_count,
+        "failed": total - passed_count,
+        "pass_rate": round(passed_count / total, 4) if total else 0.0,
+        "avg_token_f1": round(avg_f1, 4),
+        "avg_latency_ms": round(avg_latency, 2),
+        "f1_threshold": args.f1_threshold,
+    }
 
-    score_df = result.to_pandas()
-    em_list = []
-    f1_list = []
-    for r in eval_rows:
-        if _is_factoid_question(r["question"]):
-            em = 1.0 if _normalize_text(r["answer"]) == _normalize_text(r["ground_truth"]) else 0.0
-            f1 = _token_f1(r["answer"], r["ground_truth"])
-        else:
-            em = None
-            f1 = None
-        em_list.append(em)
-        f1_list.append(f1)
-    score_df["em_factoid"] = em_list
-    score_df["f1_factoid"] = f1_list
-    metric_cols = [
-        "faithfulness",
-        "answer_relevancy",
-        "context_precision",
-        "context_recall",
-    ]
-    overall = {}
-    for col in metric_cols:
-        if col in score_df.columns:
-            overall[col] = float(score_df[col].dropna().mean())
-    overall["em_factoid"] = float(score_df["em_factoid"].dropna().mean()) if score_df["em_factoid"].notna().any() else None
-    overall["f1_factoid"] = float(score_df["f1_factoid"].dropna().mean()) if score_df["f1_factoid"].notna().any() else None
+    json_path = output_dir / "run_details.json"
+    csv_path = output_dir / "per_sample_scores.csv"
+    summary_path = output_dir / "overall_metrics.json"
+    fail_path = output_dir / "failed_cases.json"
 
-    score_path = output_dir / "per_sample_scores.csv"
-    overall_path = output_dir / "overall_metrics.json"
-    details_path = output_dir / "run_details.json"
-
-    score_df.to_csv(score_path, index=False)
-    overall_path.write_text(json.dumps(overall, indent=2), encoding="utf-8")
-    details_path.write_text(
-        json.dumps({"records": rag_records, "overall": overall}, indent=2),
+    json_path.write_text(
+        json.dumps({"summary": summary, "records": results}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    fail_path.write_text(json.dumps(failed, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    print("=== Ragas Evaluation Completed ===")
-    print(f"Samples: {len(rag_records)}")
-    print(f"Overall metrics: {overall}")
-    print(f"Per-sample scores: {score_path}")
-    print(f"Overall metrics file: {overall_path}")
-    print(f"Run details: {details_path}")
+    fieldnames = list(results[0].keys()) if results else []
+    with csv_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(results)
+
+    print("\n=== Evaluation Completed (Manual-Path Based) ===")
+    print(f"Summary: {summary}")
+    print(f"Per-sample: {csv_path}")
+    print(f"Overall: {summary_path}")
+    print(f"Failed cases: {fail_path}")
+    print(f"Details: {json_path}")
 
 
 if __name__ == "__main__":

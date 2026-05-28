@@ -10,6 +10,8 @@ Payload lưu ĐẦY ĐỦ để:
      cho bước hiển thị kết quả tìm kiếm (search preview)
 """
 
+from typing import Any
+
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     Distance, VectorParams,
@@ -19,14 +21,22 @@ from qdrant_client.models import (
     FilterSelector,
     Prefetch, FusionQuery, Fusion,
 )
-from fastembed import SparseTextEmbedding
+try:
+    from fastembed import SparseTextEmbedding
+    _SPARSE_AVAILABLE = True
+except Exception:
+    SparseTextEmbedding = None  # type: ignore[assignment]
+    _SPARSE_AVAILABLE = False
 from config import QDRANT_URL, QDRANT_COLLECTION, VECTOR_DIM
+from core.embedder import is_embed_backend_ok
 
-_sparse_model: SparseTextEmbedding | None = None
+_sparse_model: Any = None
 
 
-def _get_sparse_model() -> SparseTextEmbedding:
+def _get_sparse_model():
     global _sparse_model
+    if not _SPARSE_AVAILABLE:
+        raise RuntimeError("Sparse embedding is unavailable (fastembed/onnxruntime import failed)")
     if _sparse_model is None:
         _sparse_model = SparseTextEmbedding(model_name="Qdrant/bm25")
     return _sparse_model
@@ -38,6 +48,8 @@ def _make_sparse(text: str) -> SparseVector:
 
 
 def _make_sparse_batch(texts: list[str]) -> list[SparseVector]:
+    if not _SPARSE_AVAILABLE:
+        return [SparseVector(indices=[], values=[]) for _ in texts]
     results = list(_get_sparse_model().embed(texts))
     return [SparseVector(indices=r.indices.tolist(), values=r.values.tolist()) for r in results]
 
@@ -54,19 +66,23 @@ class VectorDB:
     def ensure_collection(self):
         existing = [c.name for c in self.client.get_collections().collections]
         if QDRANT_COLLECTION not in existing:
-            self.client.create_collection(
+            kwargs = dict(
                 collection_name=QDRANT_COLLECTION,
                 vectors_config={
                     "dense": VectorParams(size=VECTOR_DIM, distance=Distance.COSINE),
                 },
-                sparse_vectors_config={
-                    "sparse": SparseVectorParams(
-                        index=SparseIndexParams(on_disk=False)
-                    )
-                },
             )
-            print(f"  Created Qdrant collection: '{QDRANT_COLLECTION}' "
-                  f"(dense={VECTOR_DIM}d + sparse BM25 + full payload)")
+            if _SPARSE_AVAILABLE:
+                kwargs["sparse_vectors_config"] = {
+                    "sparse": SparseVectorParams(index=SparseIndexParams(on_disk=False))
+                }
+            self.client.create_collection(**kwargs)
+            if _SPARSE_AVAILABLE:
+                print(f"  Created Qdrant collection: '{QDRANT_COLLECTION}' "
+                      f"(dense={VECTOR_DIM}d + sparse BM25 + full payload)")
+            else:
+                print(f"  Created Qdrant collection: '{QDRANT_COLLECTION}' "
+                      f"(dense={VECTOR_DIM}d only; sparse disabled)")
         else:
             print(f"  Qdrant collection '{QDRANT_COLLECTION}' already exists")
 
@@ -86,10 +102,11 @@ class VectorDB:
         points = [
             PointStruct(
                 id=chunk["chunk_id"],
-                vector={
-                    "dense":  dense_vec,
-                    "sparse": sparse_vec,
-                },
+                vector=(
+                    {"dense": dense_vec, "sparse": sparse_vec}
+                    if _SPARSE_AVAILABLE
+                    else {"dense": dense_vec}
+                ),
                 payload={
                     # ── Core IDs ───────────────────────────────────────────
                     "chunk_id":    chunk["chunk_id"],
@@ -123,6 +140,7 @@ class VectorDB:
                         e["type"] if isinstance(e, dict) else "CONCEPT"
                         for e in chunk.get("entities", [])
                     ],
+                    "scopes": chunk.get("scopes", []),
 
                     # ── Stats ──────────────────────────────────────────────
                     "token_count":      chunk.get("token_count", 0),
@@ -133,8 +151,12 @@ class VectorDB:
         ]
 
         self.client.upsert(collection_name=QDRANT_COLLECTION, points=points)
-        print(f"  Qdrant: upserted {len(points)} chunks "
-              f"(dense + sparse BM25 + full payload)")
+        if _SPARSE_AVAILABLE:
+            print(f"  Qdrant: upserted {len(points)} chunks "
+                  f"(dense + sparse BM25 + full payload)")
+        else:
+            print(f"  Qdrant: upserted {len(points)} chunks "
+                  f"(dense only; sparse disabled)")
 
     # ── Search ────────────────────────────────────────────────────────────────
 
@@ -145,6 +167,13 @@ class VectorDB:
         qdrant_filter từ Self-Querying lọc cứng TRƯỚC khi rank vector.
         Trả về đầy đủ payload (bao gồm clean_text, title, summary...).
         """
+        # Neu embed backend khong kha dung (dang fallback hash), bo nhanh dense de tranh nhieu.
+        if _SPARSE_AVAILABLE and not is_embed_backend_ok():
+            return self.search_sparse_only(query_text=query_text, top_k=top_k, qdrant_filter=qdrant_filter)
+
+        if not _SPARSE_AVAILABLE:
+            return self.search_dense_only(query_vector=query_vector, top_k=top_k, qdrant_filter=qdrant_filter)
+
         sparse_vec = _make_sparse(query_text)
 
         response = self.client.query_points(
@@ -187,6 +216,38 @@ class VectorDB:
                 # ── Filter metadata (dùng cho debug) ──────────────────────
                 "keywords":    r.payload.get("keywords", []),
                 "entities":    r.payload.get("entities", []),
+                "scopes":      r.payload.get("scopes", []),
+            }
+            for r in response.points
+        ]
+
+    def search_sparse_only(self, query_text: str, top_k: int = 9,
+                           qdrant_filter: Filter | None = None) -> list:
+        sparse_vec = _make_sparse(query_text)
+        response = self.client.query_points(
+            collection_name=QDRANT_COLLECTION,
+            query=sparse_vec,
+            using="sparse",
+            query_filter=qdrant_filter,
+            limit=top_k,
+            with_payload=True,
+        )
+        return [
+            {
+                "chunk_id":    r.payload.get("chunk_id", str(r.id)),
+                "doc_id":      r.payload.get("doc_id", ""),
+                "parent_id":   r.payload.get("parent_id", ""),
+                "source_file": r.payload.get("source_file", ""),
+                "seq_no":      r.payload.get("seq_no", ""),
+                "score":       r.score,
+                "source":      "qdrant_sparse",
+                "title":       r.payload.get("title", ""),
+                "summary":     r.payload.get("summary", ""),
+                "clean_text":  r.payload.get("clean_text", ""),
+                "raw_text":    r.payload.get("raw_text", ""),
+                "keywords":    r.payload.get("keywords", []),
+                "entities":    r.payload.get("entities", []),
+                "scopes":      r.payload.get("scopes", []),
             }
             for r in response.points
         ]

@@ -13,7 +13,7 @@ asyncpg>=0.29.0
 psycopg2-binary>=2.9.9
 
 # Embedding & NLP (local)
-sentence-transformers>=3.0.0
+sentence-transformers==3.0.1
 nltk>=3.8.0
 tiktoken>=0.7.0
 
@@ -32,8 +32,9 @@ uvicorn>=0.29.0
 
 # RAG evaluation (LLM-as-judge) - pinned compatible set
 ragas==0.2.12
-datasets>=2.19.0
-pandas>=2.2.0
+datasets==2.19.2
+pandas==2.2.2
+pyarrow==16.1.0
 langchain-openai==0.2.6
 langchain-community==0.3.7
 langchain-core==0.3.17

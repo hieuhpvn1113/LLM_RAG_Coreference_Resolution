@@ -1,4 +1,4 @@
-# RAG Demo - Kien truc hien tai (L1/L2 + Coref + Self-Query)
+﻿# RAG Demo - Kien truc hien tai (L1/L2 + Coref + Self-Query)
 
 Tai lieu nay mo ta DUNG he thong hien tai trong code `rag_demo`.
 
@@ -28,7 +28,7 @@ Diem khac biet chinh:
 
 ### Buoc 3 - Coref tren moi L1
 - Dung `resolve_coref()` trong `core/coref_resolver.py`
-- Mac dinh mode rule-based (`COREF_MODE=rule`), co ho tro neural
+- Mac dinh mode LLM (`COREF_MODE=llm`), co ho tro `rule/neural/hybrid`
 - Muc tieu: thay cum mo ho bang antecedent ro hon
 - Luu y quan trong:
   - `raw_text` L1 giu nguyen
@@ -121,9 +121,11 @@ User Query
 ## 7) Lenh chay nhanh
 
 ```powershell
-cd E:\AI_agent\LLM_RAG\rag_demo
+.\venv\Scripts\Activate.ps1
+cd rag_demo
 docker compose up -d
 python test_connections.py
+python reset_all_db.py --yes 
 python main.py ingest data\20260429_VNM_Ban_tin_NDT_Q1_2026.pdf
 python main.py query "Cong ty nao se to chuc cuoc hop?"
 ```

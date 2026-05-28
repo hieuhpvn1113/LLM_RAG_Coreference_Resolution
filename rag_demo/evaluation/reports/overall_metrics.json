@@ -1,8 +1,0 @@
-{
-  "faithfulness": 1.0,
-  "answer_relevancy": 0.8493504807695933,
-  "context_precision": 0.7666666666120833,
-  "context_recall": 1.0,
-  "em_factoid": 0.0,
-  "f1_factoid": 0.3744063746850124
-}

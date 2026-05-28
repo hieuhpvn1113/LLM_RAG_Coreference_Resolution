@@ -1,21 +1,23 @@
-# core/self_query.py — Self-Querying: LLM dịch câu hỏi → Qdrant Filter
+﻿# core/self_query.py â€” Self-Querying: LLM dá»‹ch cÃ¢u há»i â†’ Qdrant Filter
 """
-Luồng:
-  1. LLM đọc câu hỏi tự nhiên
-  2. Xuất JSON chứa filter conditions + search query
-  3. Build Qdrant Filter object để lọc cứng trước khi search vector/BM25
+Luá»“ng:
+  1. LLM Ä‘á»c cÃ¢u há»i tá»± nhiÃªn
+  2. Xuáº¥t JSON chá»©a filter conditions + search query
+  3. Build Qdrant Filter object Ä‘á»ƒ lá»c cá»©ng trÆ°á»›c khi search vector/BM25
 
-Filter fields có trong Qdrant payload:
+Filter fields cÃ³ trong Qdrant payload:
   - source_file   : str
   - keywords      : list[str]
   - entities      : list[str]
   - entity_types  : list[str]  (PERSON, ORG, CONCEPT, LOCATION)
+  - scopes        : list[str]  (vd: domain_scope_2026)
   - level         : int
   - token_count   : int
 """
 
 import json
 import re
+import unicodedata
 
 from qdrant_client.models import (
     Filter, FieldCondition, MatchValue, MatchAny,
@@ -25,38 +27,40 @@ from qdrant_client.models import (
 from llm.client import AsyncLLMClient
 
 
-# ── Prompt ────────────────────────────────────────────────────────────────────
+# â”€â”€ Prompt â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 SELF_QUERY_SYSTEM = """
-Bạn là bộ dịch câu hỏi sang filter JSON cho hệ thống RAG.
-Phân tích câu hỏi và trả về JSON với cấu trúc sau — CHỈ JSON thuần túy, không markdown.
+Báº¡n lÃ  bá»™ dá»‹ch cÃ¢u há»i sang filter JSON cho há»‡ thá»‘ng RAG.
+PhÃ¢n tÃ­ch cÃ¢u há»i vÃ  tráº£ vá» JSON vá»›i cáº¥u trÃºc sau â€” CHá»ˆ JSON thuáº§n tÃºy, khÃ´ng markdown.
 
 {
-  "search_query": "câu hỏi rút gọn để tìm kiếm vector/BM25",
+  "search_query": "cÃ¢u há»i rÃºt gá»n Ä‘á»ƒ tÃ¬m kiáº¿m vector/BM25",
   "filters": {
-    "source_file":   "tên file cụ thể nếu hỏi về file nào đó, null nếu không rõ",
-    "keywords_any":  ["từ khóa 1", "từ khóa 2"],
-    "entities_any":  ["tên thực thể 1", "tên thực thể 2"],
+    "source_file":   "tÃªn file cá»¥ thá»ƒ náº¿u há»i vá» file nÃ o Ä‘Ã³, null náº¿u khÃ´ng rÃµ",
+    "keywords_any":  ["tá»« khÃ³a 1", "tá»« khÃ³a 2"],
+    "entities_any":  ["tÃªn thá»±c thá»ƒ 1", "tÃªn thá»±c thá»ƒ 2"],
     "entity_types_any": ["PERSON", "ORG", "CONCEPT", "LOCATION"],
+    "scopes_any": ["domain_scope_2026"],
     "min_token_count": null,
     "max_token_count": null
   },
   "filter_mode": "strict | relaxed | none"
 }
 
-Quy tắc:
-- filter_mode = "strict"  : dùng khi câu hỏi có thực thể/tên/địa điểm rõ ràng
-- filter_mode = "relaxed" : dùng khi câu hỏi mang tính khái niệm, có một vài từ khóa
-- filter_mode = "none"    : câu hỏi quá tổng quát, không có điều kiện lọc cụ thể
-- keywords_any: chỉ lấy danh từ chính, tối đa 5 từ
-- entities_any: tên người, tổ chức, địa điểm, sản phẩm được nhắc đến
-- Nếu không có điều kiện cho trường nào → đặt null hoặc []
+Quy táº¯c:
+- filter_mode = "strict"  : dÃ¹ng khi cÃ¢u há»i cÃ³ thá»±c thá»ƒ/tÃªn/Ä‘á»‹a Ä‘iá»ƒm rÃµ rÃ ng
+- filter_mode = "relaxed" : dÃ¹ng khi cÃ¢u há»i mang tÃ­nh khÃ¡i niá»‡m, cÃ³ má»™t vÃ i tá»« khÃ³a
+- filter_mode = "none"    : cÃ¢u há»i quÃ¡ tá»•ng quÃ¡t, khÃ´ng cÃ³ Ä‘iá»u kiá»‡n lá»c cá»¥ thá»ƒ
+- keywords_any: chá»‰ láº¥y danh tá»« chÃ­nh, tá»‘i Ä‘a 5 tá»«
+- entities_any: tÃªn ngÆ°á»i, tá»• chá»©c, Ä‘á»‹a Ä‘iá»ƒm, sáº£n pháº©m Ä‘Æ°á»£c nháº¯c Ä‘áº¿n
+- scopes_any: dÃ¹ng khi cÃ¢u há»i Ã¡m chá»‰ má»™t ngá»¯ cáº£nh cá»¥ thá»ƒ (vd ÄHÄCÄ mot doanh nghiep cu the)
+- Náº¿u khÃ´ng cÃ³ Ä‘iá»u kiá»‡n cho trÆ°á»ng nÃ o â†’ Ä‘áº·t null hoáº·c []
 """.strip()
 
-SELF_QUERY_USER = "Câu hỏi: {query}"
+SELF_QUERY_USER = "CÃ¢u há»i: {query}"
 
 
-# ── Parser ────────────────────────────────────────────────────────────────────
+# â”€â”€ Parser â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _parse_json(raw: str) -> dict:
     raw = re.sub(r'^```(?:json)?\s*', '', raw.strip(), flags=re.IGNORECASE)
@@ -74,12 +78,12 @@ def _parse_json(raw: str) -> dict:
     return {}
 
 
-# ── Build Qdrant Filter ───────────────────────────────────────────────────────
+# â”€â”€ Build Qdrant Filter â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def build_qdrant_filter(parsed: dict) -> Filter | None:
     """
-    Chuyển dict filters → Qdrant Filter object.
-    Trả về None nếu không có điều kiện nào.
+    Chuyá»ƒn dict filters â†’ Qdrant Filter object.
+    Tráº£ vá» None náº¿u khÃ´ng cÃ³ Ä‘iá»u kiá»‡n nÃ o.
     """
     filters_raw = parsed.get("filters", {})
     mode        = parsed.get("filter_mode", "none")
@@ -89,30 +93,34 @@ def build_qdrant_filter(parsed: dict) -> Filter | None:
 
     must_conditions = []
 
-    # source_file — exact match
+    # source_file â€” exact match
     sf = filters_raw.get("source_file")
     if sf and isinstance(sf, str):
         must_conditions.append(
             FieldCondition(key="source_file", match=MatchValue(value=sf))
         )
 
-    # keywords_any — chunk phải chứa ÍT NHẤT 1 trong các keyword
+    # keywords_any â€” xu ly mem qua search_query (dense/sparse), khong filter cung
     kw = filters_raw.get("keywords_any")
     if kw and isinstance(kw, list) and len(kw) > 0:
         clean_kw = [str(k).strip().lower() for k in kw if k]
         if clean_kw:
-            if mode == "strict":
-                must_conditions.append(
-                    FieldCondition(key="keywords", match=MatchAny(any=clean_kw))
-                )
-            else:
-                # relaxed: thêm vào should thay vì must (không bắt buộc)
-                pass  # để search_query xử lý qua BM25
+            pass
 
-    # entities_any — chunk phải chứa ÍT NHẤT 1 entity
+    # entities_any â€” chunk pháº£i chá»©a ÃT NHáº¤T 1 entity
     ents = filters_raw.get("entities_any")
     if ents and isinstance(ents, list) and len(ents) > 0:
-        clean_ents = [str(e).strip() for e in ents if e]
+        clean_ents = []
+        for e in ents:
+            if not e:
+                continue
+            token = str(e).strip()
+            # Bo qua token dang ngay/so de tranh over-filter (vd 31/03/2025).
+            if re.fullmatch(r"\d{1,2}/\d{1,2}/\d{4}", token):
+                continue
+            if re.fullmatch(r"[\d\.,%]+", token):
+                continue
+            clean_ents.append(token)
         if clean_ents and mode == "strict":
             must_conditions.append(
                 FieldCondition(key="entities", match=MatchAny(any=clean_ents))
@@ -141,22 +149,38 @@ def build_qdrant_filter(parsed: dict) -> Filter | None:
             )
         )
 
+    # scopes_any
+    # Khong filter cung theo scope vi de gay mat recall khi metadata scope khong dong nhat.
+    scopes = filters_raw.get("scopes_any")
+    if scopes and isinstance(scopes, list) and len(scopes) > 0:
+        clean_scopes = [str(s).strip().lower() for s in scopes if s]
+        if clean_scopes:
+            pass
+
     if not must_conditions:
         return None
 
     return Filter(must=must_conditions)
 
 
-# ── Main entry ────────────────────────────────────────────────────────────────
+def _normalize_text(text: str) -> str:
+    text = unicodedata.normalize("NFKD", (text or "")).encode("ascii", "ignore").decode("ascii")
+    text = text.lower()
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+
+# â”€â”€ Main entry â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async def self_query(query: str, llm: AsyncLLMClient) -> dict:
     """
-    Gọi LLM để phân tích câu hỏi → trả về:
+    Gá»i LLM Ä‘á»ƒ phÃ¢n tÃ­ch cÃ¢u há»i â†’ tráº£ vá»:
     {
-        "search_query" : str,          # query rút gọn để vector/BM25
+        "search_query" : str,          # query rÃºt gá»n Ä‘á»ƒ vector/BM25
         "qdrant_filter": Filter | None, # filter object cho Qdrant
         "filter_mode"  : str,          # strict / relaxed / none
-        "raw_parsed"   : dict,         # JSON gốc LLM trả về (debug)
+        "raw_parsed"   : dict,         # JSON gá»‘c LLM tráº£ vá» (debug)
     }
     """
     try:
@@ -188,3 +212,4 @@ async def self_query(query: str, llm: AsyncLLMClient) -> dict:
         "filter_mode":   filter_mode,
         "raw_parsed":    parsed,
     }
+
