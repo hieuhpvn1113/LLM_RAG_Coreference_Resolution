@@ -26,11 +26,12 @@ class GraphDB:
             session.run("CREATE CONSTRAINT entity_name IF NOT EXISTS FOR (e:Entity) REQUIRE e.name IS UNIQUE")
         print("  Neo4j constraints ensured")
 
-    def upsert_document(self, doc_id: str, file_name: str):
+    def upsert_document(self, doc_id: str, file_name: str, subject_name: str = ""):
         with self.driver.session() as session:
             session.run(
-                "MERGE (d:Document {doc_id: $doc_id}) SET d.file_name = $file_name",
-                doc_id=doc_id, file_name=file_name,
+                "MERGE (d:Document {doc_id: $doc_id}) "
+                "SET d.file_name = $file_name, d.subject_name = $subject_name",
+                doc_id=doc_id, file_name=file_name, subject_name=subject_name or "",
             )
 
     def upsert_chunk_node(self, chunk: dict):
@@ -39,7 +40,8 @@ class GraphDB:
                 """
                 MERGE (c:Chunk {chunk_id: $chunk_id})
                 SET c.doc_id = $doc_id, c.level = $level,
-                    c.seq_no = $seq_no, c.title = $title, c.summary = $summary
+                    c.seq_no = $seq_no, c.title = $title, c.summary = $summary,
+                    c.doc_subject = $doc_subject
                 WITH c
                 MATCH (d:Document {doc_id: $doc_id})
                 MERGE (c)-[:BELONGS_TO]->(d)
@@ -47,6 +49,7 @@ class GraphDB:
                 chunk_id=chunk["chunk_id"], doc_id=chunk["doc_id"],
                 level=chunk.get("level", 2), seq_no=chunk.get("seq_no", "0"),
                 title=chunk.get("title", ""), summary=chunk.get("summary", ""),
+                doc_subject=chunk.get("doc_subject", ""),
             )
 
     def create_parent_relationship(self, parent_id: str, child_id: str):

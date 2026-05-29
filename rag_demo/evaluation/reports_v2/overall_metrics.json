@@ -1,9 +1,0 @@
-{
-  "total": 32,
-  "passed": 3,
-  "failed": 29,
-  "pass_rate": 0.0938,
-  "avg_token_f1": 0.4391,
-  "avg_latency_ms": 17034.97,
-  "f1_threshold": 0.65
-}

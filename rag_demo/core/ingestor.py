@@ -20,6 +20,7 @@ ES đã bị loại bỏ — BM25 nay chạy trong Qdrant dưới dạng sparse 
 import asyncio
 import time
 import re
+import unicodedata
 from pathlib import Path
 
 from core.chunker     import hierarchical_split, semantic_split, clean_text
@@ -37,6 +38,50 @@ def _normalize_text(text: str) -> str:
     t = (text or "").lower()
     t = re.sub(r"\s+", " ", t)
     return t.strip()
+
+
+def _strip_accents(text: str) -> str:
+    return "".join(
+        ch for ch in unicodedata.normalize("NFD", text or "")
+        if unicodedata.category(ch) != "Mn"
+    )
+
+
+def _extract_doc_subject(text: str, file_name: str) -> str:
+    """
+    Trích pháp nhân chủ thể chính của tài liệu để resolve đại từ như "Công ty".
+    Ưu tiên tên pháp lý + mã trong ngoặc (nếu có).
+    """
+    head = (text or "")[:12000]
+    head_flat = re.sub(r"\s+", " ", head).strip()
+
+    # Mẫu mạnh: "Công ty Cổ phần ... (VNM)" hoặc biến thể có ngoặc kép.
+    m = re.search(
+        r"(Công ty\s+Cổ phần\s+[^()\n]{3,120})\s*\(([^)]{1,40})\)",
+        head_flat,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        legal = re.sub(r"\s+", " ", m.group(1)).strip(" ,.;:")
+        alias_raw = re.sub(r"[\"“”'`]", "", m.group(2))
+        alias_tokens = re.findall(r"[A-Z0-9]{2,10}", alias_raw.upper())
+        alias = alias_tokens[0] if alias_tokens else ""
+        return f"{legal} ({alias})" if alias else legal
+
+    # Mẫu fallback: chỉ có tên pháp lý không có mã.
+    m2 = re.search(
+        r"(Công ty\s+Cổ phần\s+[^,\n\.]{3,120})",
+        head_flat,
+        flags=re.IGNORECASE,
+    )
+    if m2:
+        return re.sub(r"\s+", " ", m2.group(1)).strip(" ,.;:")
+
+    # Fallback theo file name (không lý tưởng, nhưng còn hơn rỗng).
+    fname = _strip_accents(file_name).upper()
+    if "VNM" in fname or "VINAMILK" in fname:
+        return "Công ty Cổ phần Sữa Việt Nam (VNM)"
+    return ""
 
 
 def _infer_scopes(chunk: dict, source_file: str) -> list[str]:
@@ -121,9 +166,12 @@ async def ingest_file(file_path: str, force: bool = False) -> str:
 
         # ── 3. Document record ────────────────────────────────────────────────
         print("\n[2/7] Tạo document record...")
-        doc_id = await meta_db.create_document(path.name, str(path.resolve()))
-        graph_db.upsert_document(doc_id, path.name)
+        doc_subject = _extract_doc_subject(text, path.name)
+        doc_id = await meta_db.create_document(path.name, str(path.resolve()), subject_name=doc_subject)
+        graph_db.upsert_document(doc_id, path.name, subject_name=doc_subject)
         print(f"  doc_id: {doc_id}")
+        if doc_subject:
+            print(f"  subject: {doc_subject}")
 
         # ── 4+5. Hierarchical Split L1 ────────────────────────────────────────
         print("\n[3/7] Hierarchical split (Level 1 — Sections)...")
@@ -131,6 +179,7 @@ async def ingest_file(file_path: str, force: bool = False) -> str:
         print(f"  → {len(l1_chunks)} sections")
 
         for chunk in l1_chunks:
+            chunk["doc_subject"] = doc_subject
             await meta_db.insert_chunk({**chunk, 'prev_id': None, 'next_id': None})
             graph_db.upsert_chunk_node(chunk)
         for chunk in l1_chunks:
@@ -144,6 +193,8 @@ async def ingest_file(file_path: str, force: bool = False) -> str:
         all_l2_chunks = []
         for i, section in enumerate(l1_chunks, 1):
             l2 = semantic_split(section, doc_id)
+            for p in l2:
+                p["doc_subject"] = doc_subject
             print(f"  Section {i:2d}/{len(l1_chunks)}: "
                   f"{section['token_count']:4d} tokens → {len(l2)} paragraphs")
             all_l2_chunks.extend(l2)

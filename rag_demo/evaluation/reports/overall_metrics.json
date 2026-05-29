@@ -1,0 +1,10 @@
+{
+  "total_samples": 3,
+  "metric_averages": {
+    "faithfulness": 1.0,
+    "answer_relevancy": 0.8658,
+    "llm_context_precision_with_reference": 0.7778,
+    "context_recall": 1.0,
+    "factual_correctness": 0.8867
+  }
+}

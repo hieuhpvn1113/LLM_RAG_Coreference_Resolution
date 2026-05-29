@@ -10,6 +10,9 @@ class MetaDB:
 
     async def connect(self):
         self.pool = await asyncpg.create_pool(PG_DSN, min_size=2, max_size=10)
+        async with self.pool.acquire() as conn:
+            await conn.execute("ALTER TABLE documents ADD COLUMN IF NOT EXISTS subject_name TEXT")
+            await conn.execute("ALTER TABLE chunks ADD COLUMN IF NOT EXISTS doc_subject TEXT")
         print("✅ PostgreSQL connected")
 
     async def close(self):
@@ -32,17 +35,28 @@ class MetaDB:
             )
             return dict(row) if row else None
 
-    async def create_document(self, file_name: str, file_path: str) -> str:
+    async def create_document(self, file_name: str, file_path: str, subject_name: str = "") -> str:
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
-                INSERT INTO documents (file_name, file_path, status)
-                VALUES ($1, $2, 'processing')
+                INSERT INTO documents (file_name, file_path, subject_name, status)
+                VALUES ($1, $2, $3, 'processing')
                 RETURNING doc_id::TEXT
                 """,
-                file_name, file_path
+                file_name, file_path, (subject_name or None)
             )
             return row["doc_id"]
+
+    async def update_document_subject(self, doc_id: str, subject_name: str):
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE documents
+                SET subject_name = $2, updated_at = NOW()
+                WHERE doc_id = $1::UUID
+                """,
+                doc_id, (subject_name or None)
+            )
 
     async def finalize_document(self, doc_id: str, total_chunks: int):
         async with self.pool.acquire() as conn:
@@ -64,9 +78,9 @@ class MetaDB:
                     """
                     INSERT INTO chunks (
                         chunk_id, doc_id, level, parent_id, prev_id, next_id, seq_no,
-                        raw_text, clean_text, token_count, source_file, char_start, char_end
+                        raw_text, clean_text, token_count, source_file, doc_subject, char_start, char_end
                     )
-                    VALUES ($1::UUID,$2,$3,$4::UUID,$5::UUID,$6::UUID,$7,$8,$9,$10,$11,$12,$13)
+                    VALUES ($1::UUID,$2,$3,$4::UUID,$5::UUID,$6::UUID,$7,$8,$9,$10,$11,$12,$13,$14)
                     ON CONFLICT (chunk_id) DO NOTHING
                     RETURNING chunk_id::TEXT
                     """,
@@ -75,6 +89,7 @@ class MetaDB:
                     chunk.get("parent_id"), chunk.get("prev_id"), chunk.get("next_id"),
                     chunk["seq_no"], chunk["raw_text"], chunk.get("clean_text"),
                     chunk.get("token_count"), chunk.get("source_file"),
+                    chunk.get("doc_subject"),
                     chunk.get("char_start"), chunk.get("char_end")
                 )
                 return row["chunk_id"] if row else chunk["chunk_id"]
@@ -83,15 +98,16 @@ class MetaDB:
                     """
                     INSERT INTO chunks (
                         doc_id, level, parent_id, prev_id, next_id, seq_no,
-                        raw_text, clean_text, token_count, source_file, char_start, char_end
+                        raw_text, clean_text, token_count, source_file, doc_subject, char_start, char_end
                     )
-                    VALUES ($1,$2,$3::UUID,$4::UUID,$5::UUID,$6,$7,$8,$9,$10,$11,$12)
+                    VALUES ($1,$2,$3::UUID,$4::UUID,$5::UUID,$6,$7,$8,$9,$10,$11,$12,$13)
                     RETURNING chunk_id::TEXT
                     """,
                     chunk["doc_id"], chunk["level"],
                     chunk.get("parent_id"), chunk.get("prev_id"), chunk.get("next_id"),
                     chunk["seq_no"], chunk["raw_text"], chunk.get("clean_text"),
                     chunk.get("token_count"), chunk.get("source_file"),
+                    chunk.get("doc_subject"),
                     chunk.get("char_start"), chunk.get("char_end")
                 )
                 return row["chunk_id"]
@@ -145,6 +161,7 @@ class MetaDB:
                 """
                 SELECT c.chunk_id::TEXT, c.level, c.seq_no,
                        c.title, c.source_file, c.token_count,
+                       c.doc_subject,
                        c.parent_id::TEXT, c.prev_id::TEXT, c.next_id::TEXT,
                        p.title AS parent_title
                 FROM chunks c
@@ -165,7 +182,7 @@ class MetaDB:
             rows = await conn.fetch(
                 """
                 SELECT chunk_id::TEXT, seq_no, raw_text, title,
-                       source_file, token_count, level
+                       source_file, token_count, level, doc_subject
                 FROM chunks
                 WHERE chunk_id = ANY($1::UUID[])
                   AND level = 1

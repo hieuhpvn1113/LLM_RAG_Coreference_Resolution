@@ -113,6 +113,7 @@ class VectorDB:
                     "doc_id":      chunk["doc_id"],
                     "parent_id":   chunk.get("parent_id", ""),
                     "source_file": chunk.get("source_file", ""),
+                    "doc_subject": chunk.get("doc_subject", ""),
                     "level":       chunk.get("level", 2),
                     "seq_no":      chunk.get("seq_no", "0"),
 
@@ -204,6 +205,7 @@ class VectorDB:
                 "doc_id":      r.payload.get("doc_id", ""),
                 "parent_id":   r.payload.get("parent_id", ""),
                 "source_file": r.payload.get("source_file", ""),
+                "doc_subject": r.payload.get("doc_subject", ""),
                 "seq_no":      r.payload.get("seq_no", ""),
                 # ── Score ─────────────────────────────────────────────────
                 "score":       r.score,
@@ -238,6 +240,7 @@ class VectorDB:
                 "doc_id":      r.payload.get("doc_id", ""),
                 "parent_id":   r.payload.get("parent_id", ""),
                 "source_file": r.payload.get("source_file", ""),
+                "doc_subject": r.payload.get("doc_subject", ""),
                 "seq_no":      r.payload.get("seq_no", ""),
                 "score":       r.score,
                 "source":      "qdrant_sparse",
